@@ -21,6 +21,7 @@ INTERNAL_SERVER_PORT = int(os.environ.get("INTERNAL_SERVER_PORT", 17532))
 INTERNAL_SERVER_HOST = "127.0.0.1"
 MIRROR_SITE = os.environ.get("MIRROR_SITE", "stake.ac")
 TARGET_URL = f"https://{MIRROR_SITE}/"
+WARMUP_DELAY = int(os.environ.get("WARMUP_DELAY", 45)) # Time to wait for site to load before loading extension
 
 # Global state
 bot_state = {
@@ -194,7 +195,11 @@ def main():
     else:
         print("[MAIN] Using existing profile. Preserving cookies/session data.", flush=True)
 
-    prepare_sideload_extension()
+    # Clean existing extensions out of the profile so we start naked for Stage 1
+    ext_dest_path = os.path.join(PROFILE_DIR, "extensions")
+    if os.path.exists(ext_dest_path):
+        shutil.rmtree(ext_dest_path)
+        print("[MAIN] Cleaned existing extensions for warmup phase.", flush=True)
 
     prefs_path = os.path.join(PROFILE_DIR, "user.js")
     print(f"[MAIN] Writing Firefox preferences...", flush=True)
@@ -256,10 +261,6 @@ def main():
         f.write(prefs_content)
     print("[MAIN] ✓ Preferences written.", flush=True)
 
-    print("\n" + "=" * 60, flush=True)
-    print("[MAIN] 🚀 Starting Firefox...", flush=True)
-    print("=" * 60, flush=True)
-    
     cmd = [
         "firefox",
         "--display=:0",
@@ -268,8 +269,6 @@ def main():
         "--no-sandbox" 
     ]
     
-    print(f"[MAIN] Firefox command: {' '.join(cmd)}", flush=True)
-
     custom_env = {
         **os.environ, 
         "DISPLAY": ":0",
@@ -278,13 +277,47 @@ def main():
         "GDK_BACKEND": "x11"
     }
 
+    # ==========================================
+    # STAGE 1: WARMUP RUN (NO EXTENSION)
+    # ==========================================
+    print("\n" + "=" * 60, flush=True)
+    print("[MAIN] 🕒 STAGE 1: Starting Firefox WITHOUT extension to pass checks...", flush=True)
+    print("=" * 60, flush=True)
+    print(f"[MAIN] Firefox command: {' '.join(cmd)}", flush=True)
+
+    process = subprocess.Popen(cmd, env=custom_env)
+    
+    print(f"[MAIN] Waiting {WARMUP_DELAY} seconds for site to load and clear Cloudflare...", flush=True)
+    time.sleep(WARMUP_DELAY)
+
+    print("[MAIN] 🛑 Killing Firefox to load extension...", flush=True)
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    time.sleep(3) # Give it a moment to release file locks and clean up gracefully
+
+    # ==========================================
+    # STAGE 2: MAIN RUN (WITH EXTENSION)
+    # ==========================================
+    print("\n" + "=" * 60, flush=True)
+    print("[MAIN] 🧩 STAGE 2: Preparing and loading the extension...", flush=True)
+    print("=" * 60, flush=True)
+
+    prepare_sideload_extension()
+
+    print("\n" + "=" * 60, flush=True)
+    print("[MAIN] 🚀 Restarting Firefox WITH extension...", flush=True)
+    print("=" * 60, flush=True)
+
     process = subprocess.Popen(cmd, env=custom_env)
     
     bot_state["firefox_pid"] = process.pid
     bot_state["status"] = "running"
     
     print("\n" + "=" * 60, flush=True)
-    print("🔥 FIREFOX LAUNCHED SUCCESSFULLY", flush=True)
+    print("🔥 FIREFOX LAUNCHED SUCCESSFULLY (WITH EXTENSION)", flush=True)
     print("=" * 60, flush=True)
     
     try:
