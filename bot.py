@@ -15,7 +15,7 @@ from datetime import datetime
 # ================================
 WORKDIR = "/app"
 EXTENSION_DIR = os.path.join(WORKDIR, "claimer")
-# CHANGED: Persistent directory so you don't lose Cloudflare clearance
+# Persistent directory so you don't lose Cloudflare clearance
 PROFILE_DIR = os.path.join(WORKDIR, "firefox-profile") 
 INTERNAL_SERVER_PORT = int(os.environ.get("INTERNAL_SERVER_PORT", 17532))
 INTERNAL_SERVER_HOST = "127.0.0.1"
@@ -188,7 +188,6 @@ def main():
     time.sleep(5)
     print("[MAIN] ✓ Xvfb should be ready", flush=True)
 
-    # FIXED: Persistence Logic
     if not os.path.exists(PROFILE_DIR):
         os.makedirs(PROFILE_DIR)
         print("[MAIN] Created new profile directory.", flush=True)
@@ -200,7 +199,9 @@ def main():
     prefs_path = os.path.join(PROFILE_DIR, "user.js")
     print(f"[MAIN] Writing Firefox preferences...", flush=True)
     
-    # FIXED: Hardware & UA Spoofing
+    # NEW STEALTH UA: High-quality Firefox on Windows 10 string
+    REAL_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0"
+    
     prefs_content = f"""
     // Extension logic
     user_pref("xpinstall.signatures.required", false);
@@ -213,14 +214,27 @@ def main():
     user_pref("usePrivilegedMozillaProcess", true);
     user_pref("privacy.resistFingerprinting", false);
     
+    // Fix Hardware Concurrency (Stop reporting 0 or 1)
+    user_pref("dom.maxHardwareConcurrency", 8);
+    user_pref("dom.processorCoreCount", 8);
+
     // Hardware Rendering Spoof (Hides 'Mesa' driver)
     user_pref("webgl.renderer-string-override", "NVIDIA GeForce RTX 3080");
     user_pref("webgl.vendor-string-override", "NVIDIA Corporation");
     user_pref("webgl.force-enabled", true);
     user_pref("webgl.disabled", false);
 
-    // User Agent Spoof (Windows 10/11 common string)
-    user_pref("general.useragent.override", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+    // Fix Platform Mismatch (Screamer Fix: Sets navigator.platform to Win32)
+    user_pref("general.useragent.override", "{REAL_UA}");
+    user_pref("general.platform.override", "Win32");
+    user_pref("general.appversion.override", "5.0 (Windows NT 10.0; Win64; x64)");
+    user_pref("general.oscpu.override", "Windows NT 10.0; Win64; x64");
+
+    // Silence Remote Security errors (PEM download failures)
+    user_pref("security.remote_settings.intermediates.enabled", false);
+    user_pref("security.remote_settings.crlite_filters.enabled", false);
+    user_pref("app.normandy.enabled", false);
+    user_pref("app.shield.optoutstudies.enabled", false);
     
     // Developer mode / Debugging
     user_pref("devtools.chrome.enabled", true);
@@ -251,7 +265,6 @@ def main():
     
     print(f"[MAIN] Firefox command: {' '.join(cmd)}", flush=True)
 
-    # FIXED: Passing hardware acceleration environment variables
     custom_env = {
         **os.environ, 
         "DISPLAY": ":0",
