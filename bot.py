@@ -23,12 +23,56 @@ MIRROR_SITE = os.environ.get("MIRROR_SITE", "stake.ac")
 TARGET_URL = f"https://{MIRROR_SITE}/"
 WARMUP_DELAY = int(os.environ.get("WARMUP_DELAY", 45)) # Time to wait for site to load before loading extension
 
+BOT_START_TIME = time.time()
+
 # Global state
 bot_state = {
     "status": "starting",
     "last_heartbeat": None,
     "firefox_pid": None,
 }
+
+# ================================
+# LIGHTWEIGHT SYSTEM STATS
+# ================================
+def get_system_stats():
+    """Lightweight function to get CPU, RAM, and Uptime without external heavy libraries."""
+    stats = {
+        "cpu_load_1_5_15": [0, 0, 0],
+        "ram_total_mb": 0,
+        "ram_free_mb": 0,
+        "system_uptime_seconds": 0,
+        "bot_uptime_seconds": int(time.time() - BOT_START_TIME)
+    }
+    
+    # Get CPU Load (1, 5, 15 minute averages)
+    try:
+        if hasattr(os, 'getloadavg'):
+            stats["cpu_load_1_5_15"] = list(os.getloadavg())
+    except:
+        pass
+
+    # Get RAM usage natively from Linux /proc/meminfo (Zero dependency overhead)
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    stats["ram_total_mb"] = round(int(line.split()[1]) / 1024, 2)
+                elif line.startswith('MemAvailable:') or line.startswith('MemFree:'):
+                    stats["ram_free_mb"] = round(int(line.split()[1]) / 1024, 2)
+                    if line.startswith('MemAvailable:'):
+                        break # MemAvailable is more accurate if present
+    except:
+        pass
+
+    # Get System Uptime
+    try:
+        with open('/proc/uptime', 'r') as f:
+            stats["system_uptime_seconds"] = float(f.readline().split()[0])
+    except:
+        pass
+        
+    return stats
 
 # ================================
 # INTERNAL HTTP SERVER
@@ -59,6 +103,8 @@ class InternalAPIHandler(BaseHTTPRequestHandler):
                 "last_heartbeat": bot_state["last_heartbeat"],
                 "firefox_pid": bot_state["firefox_pid"],
             })
+        elif self.path == "/stats":
+            self._send_json_response(get_system_stats())
         else:
             self._send_json_response({"error": "Not found"}, status=404)
     
@@ -79,6 +125,7 @@ class InternalAPIHandler(BaseHTTPRequestHandler):
             
             print(f"\n{'='*60}", flush=True)
             print(f"[INTERNAL API] 🔄 RESTART REQUESTED: {reason}", flush=True)
+            print(f"[INTERNAL API] 🛑 Terminating main process to force Heroku container restart...", flush=True)
             print(f"{'='*60}\n", flush=True)
             
             self._send_json_response({"restart_scheduled": True})
@@ -89,7 +136,9 @@ class InternalAPIHandler(BaseHTTPRequestHandler):
     
     def _trigger_restart(self):
         time.sleep(2)
-        print("[INTERNAL API] 🔌 Exiting for restart...", flush=True)
+        print("[INTERNAL API] 🔌 Exiting immediately...", flush=True)
+        # os._exit kills the process violently without cleanup handlers, 
+        # ensuring the container truly dies and Heroku triggers a fresh boot.
         os._exit(1)
 
 
@@ -195,11 +244,11 @@ def main():
     else:
         print("[MAIN] Using existing profile. Preserving cookies/session data.", flush=True)
 
-    # Clean existing extensions out of the profile so we start naked for Stage 1
+    # Clean existing extensions out of the profile so we start fresh with the new zip
     ext_dest_path = os.path.join(PROFILE_DIR, "extensions")
     if os.path.exists(ext_dest_path):
         shutil.rmtree(ext_dest_path)
-        print("[MAIN] Cleaned existing extensions for warmup phase.", flush=True)
+        print("[MAIN] Cleaned existing extensions before sideloading.", flush=True)
 
     prefs_path = os.path.join(PROFILE_DIR, "user.js")
     print(f"[MAIN] Writing Firefox preferences...", flush=True)
@@ -278,38 +327,18 @@ def main():
     }
 
     # ==========================================
-    # STAGE 1: WARMUP RUN (NO EXTENSION)
+    # PREPARE AND LOAD EXTENSION
     # ==========================================
     print("\n" + "=" * 60, flush=True)
-    print("[MAIN] 🕒 STAGE 1: Starting Firefox WITHOUT extension to pass checks...", flush=True)
-    print("=" * 60, flush=True)
-    print(f"[MAIN] Firefox command: {' '.join(cmd)}", flush=True)
-
-    process = subprocess.Popen(cmd, env=custom_env)
-    
-    print(f"[MAIN] Waiting {WARMUP_DELAY} seconds for site to load and clear Cloudflare...", flush=True)
-    time.sleep(WARMUP_DELAY)
-
-    print("[MAIN] 🛑 Killing Firefox to load extension...", flush=True)
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-    time.sleep(3) # Give it a moment to release file locks and clean up gracefully
-
-    # ==========================================
-    # STAGE 2: MAIN RUN (WITH EXTENSION)
-    # ==========================================
-    print("\n" + "=" * 60, flush=True)
-    print("[MAIN] 🧩 STAGE 2: Preparing and loading the extension...", flush=True)
+    print("[MAIN] 🧩 Preparing and loading the extension...", flush=True)
     print("=" * 60, flush=True)
 
     prepare_sideload_extension()
 
     print("\n" + "=" * 60, flush=True)
-    print("[MAIN] 🚀 Restarting Firefox WITH extension...", flush=True)
+    print("[MAIN] 🚀 Launching Firefox WITH extension...", flush=True)
     print("=" * 60, flush=True)
+    print(f"[MAIN] Firefox command: {' '.join(cmd)}", flush=True)
 
     process = subprocess.Popen(cmd, env=custom_env)
     
