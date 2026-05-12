@@ -19,7 +19,7 @@ EXTENSION_DIR = os.path.join(WORKDIR, "claimer")
 PROFILE_DIR = os.path.join(WORKDIR, "firefox-profile") 
 INTERNAL_SERVER_PORT = int(os.environ.get("INTERNAL_SERVER_PORT", 17532))
 INTERNAL_SERVER_HOST = "127.0.0.1"
-MIRROR_SITE = os.environ.get("MIRROR_SITE", "stake.ac")
+MIRROR_SITE = os.environ.get("MIRROR_SITE", "stake.pet")
 TARGET_URL = f"https://{MIRROR_SITE}/"
 WARMUP_DELAY = int(os.environ.get("WARMUP_DELAY", 45)) # Time to wait for site to load before loading extension
 
