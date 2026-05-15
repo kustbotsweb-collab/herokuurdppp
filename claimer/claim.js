@@ -235,7 +235,7 @@ const GM_xmlhttpRequest = (details) => {
     const TURNSTILE_SITE_KEY = '0x4AAAAAAAGD4gMGOTFnvupz';
     
     // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here
-    const REPORTING_BACKEND_URL = 'https://code-dash-14881cdc0bc0.herokuapp.com/api/claim-report';
+    const REPORTING_BACKEND_URL = 'https://code-dash1-a6f0feeb4e8b.herokuapp.com/api/claim-report';
     
     // 🌍 DYNAMIC MIRROR EXTRACTION
     // Extracts the exact origin (e.g., https://stake.com, https://stake.ac, https://stake.bet)
