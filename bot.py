@@ -263,6 +263,16 @@ def main():
     user_pref("extensions.enabledScopes", 15);
     user_pref("extensions.startupScanScopes", 15);
     
+    // Disable First-Run, Terms, and Telemetry Prompts
+    user_pref("datareporting.healthreport.service.firstRun", false);
+    user_pref("datareporting.policy.dataSubmissionEnabled", false);
+    user_pref("datareporting.policy.dataSubmissionPolicyAcceptedVersion", 2);
+    user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+    user_pref("browser.aboutwelcome.enabled", false);
+    user_pref("browser.rights.3.shown", true);
+    user_pref("browser.EULA.override", true);
+    user_pref("browser.EULA.3.accepted", true);
+    
     // Anti-detection & Hardware Spoofing
     user_pref("dom.webdriver.enabled", false);
     user_pref("usePrivilegedMozillaProcess", true);
