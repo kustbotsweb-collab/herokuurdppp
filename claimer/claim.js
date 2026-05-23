@@ -259,9 +259,8 @@ const GM_xmlhttpRequest = (details) => {
     // Track codes currently being processed (to prevent duplicate processing)
     let processingCodes = new Set();
 
-    // 🚦 RATE LIMITER: Max 2 codes per 20 seconds, and 0.5s between claims
-    let rateLimitTimestamps = [];
-    let lastCodeClaimTime = 0;
+    // 🚦 RATE LIMITER: 1 direct claim request per 60 seconds
+    let lastDirectClaimTime = 0;
     
     let rates = {};
     // Currency conversion rates
@@ -1881,7 +1880,6 @@ const GM_xmlhttpRequest = (details) => {
                     bonusCodeInformation(code: $code, couponType: $couponType) {
                         availabilityStatus
                         bonusValue
-                        cryptoMultiplier
                     }
                 }
             `;
@@ -2367,33 +2365,51 @@ const GM_xmlhttpRequest = (details) => {
         // Only apply rate limits and add to claimedCodes if not a retry
         if (!isRetry) {
             claimedCodes.add(code);
-
-            // --- 🚦 RATE LIMIT CHECK 1 (Max 2 codes per 20 seconds) ---
-            const now = Date.now();
-            rateLimitTimestamps = rateLimitTimestamps.filter(t => now - t < 20000);
-            if (rateLimitTimestamps.length >= 2) {
-                addLog(`Rate limit exceeded! Dropped code: ${code} (Max 2 per 20s)`, "warning");
-                return; // Stop processing this code
-            }
-            rateLimitTimestamps.push(now);
-            
-            // --- 🚦 RATE LIMIT CHECK 2 (0.5s difference between codes) ---
-            const timeSinceLast = now - lastCodeClaimTime;
-            if (timeSinceLast < 500) {
-                const delay = 500 - timeSinceLast;
-                lastCodeClaimTime = now + delay; // Set target execution time
-                await new Promise(resolve => setTimeout(resolve, delay));
-            } else {
-                lastCodeClaimTime = now;
-            }
-            // --------------------------------------------------------
         }
         processingCodes.add(code);
 
-        // 🔥 CALL INFO API FIRST - WITHOUT WAITING FOR RESPONSE
-        // Fire the info API call and immediately proceed to claim (fire and forget)
-        if (stakeApi) {
-            stakeApi.checkBonusCode(code).catch(() => {}); // Fire and forget - no waiting
+        // Determine if we need to check info API
+        let requiresInfoCheck = false;
+        
+        if (!isRetry) {
+            const now = Date.now();
+            if (now - lastDirectClaimTime >= 60000) {
+                // First code in 60s window - direct claim
+                lastDirectClaimTime = now;
+            } else {
+                // Subsequent code in window - requires info check
+                requiresInfoCheck = true;
+            }
+        }
+        
+        if (requiresInfoCheck) {
+            const logId = addLog(`Checking availability for ${code}...`, "info");
+            if (stakeApi) {
+                try {
+                    const infoRes = await stakeApi.checkBonusCode(code);
+                    if (infoRes.success && infoRes.data && infoRes.data.availabilityStatus === "available") {
+                        updateLog(logId, `Code ${code} is available! Proceeding to claim...`, "success");
+                    } else {
+                        const status = (infoRes.data && infoRes.data.availabilityStatus) ? infoRes.data.availabilityStatus : "Unavailable";
+                        updateLog(logId, `Skipped ${code} (Status: ${status})`, "warning");
+                        processingCodes.delete(code);
+                        return; // Abort claim as code is not available
+                    }
+                } catch (e) {
+                    updateLog(logId, `Info check failed for ${code}: ${e.message}`, "error");
+                    processingCodes.delete(code);
+                    return;
+                }
+            } else {
+                // If stakeApi is not initialized somehow, just fail safe and abort
+                processingCodes.delete(code);
+                return;
+            }
+        } else {
+            // 🔥 CALL INFO API FIRST - WITHOUT WAITING FOR RESPONSE (For stats, direct claim path only)
+            if (stakeApi && !isRetry) {
+                stakeApi.checkBonusCode(code).catch(() => {});
+            }
         }
 
         // 1. INSTANT SYNC TOKEN GRAB WITH METRICS
