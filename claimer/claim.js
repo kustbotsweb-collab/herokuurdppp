@@ -234,8 +234,8 @@ const GM_xmlhttpRequest = (details) => {
     const TG_CHAT_ID = '7618467489';
     const TURNSTILE_SITE_KEY = '0x4AAAAAAAGD4gMGOTFnvupz';
     
-    // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here (Dynamic from velocity config)
-    let REPORTING_BACKEND_URL = 'https://code-dash1-a6f0feeb4e8b.herokuapp.com/api/claim-report';
+    // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here
+    const REPORTING_BACKEND_URL = 'https://code-dash1-a6f0feeb4e8b.herokuapp.com/api/claim-report';
     
     // 🌍 DYNAMIC MIRROR EXTRACTION
     // Extracts the exact origin (e.g., https://stake.com, https://stake.ac, https://stake.bet)
@@ -3626,11 +3626,6 @@ const GM_xmlhttpRequest = (details) => {
                             }
                             if (config.healthUrl) {
                                 HEALTH_WS_URL = config.healthUrl;
-                            }
-                            if (config.dashUrl) {
-                                REPORTING_BACKEND_URL = config.dashUrl;
-                            } else if (config.reportUrl) {
-                                REPORTING_BACKEND_URL = config.reportUrl;
                             }
                             addLog(`Config loaded`, "success");
                             resolve(true);
