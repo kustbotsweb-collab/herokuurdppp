@@ -5,7 +5,7 @@
 
 const SERVER_URL = "wss://kingclaimer.xyz:8443/";
 const TOTAL_CLIENTS = 200;
-const RECONNECT_DELAY = 1000;
+const RECONNECT_DELAY = 80;
 const SHARED_SECRET = "vipxK9mP2vL8nQ4wRjT5bYc";
 
 let clients = [];
@@ -120,7 +120,7 @@ class StressClient {
                 this.connected = true;
                 this.failureStartTime = null;
                 log(`✅ [Client ${this.clientID}] Successfully connected as ${this.username}`, 'success');
-               
+                
                 const regPayload = {
                     type: "register",
                     role: "claimer",
@@ -191,20 +191,13 @@ class StressClient {
 }
 
 // ==========================================
-// START / STOP + MULTI TAB
+// START / STOP
 // ==========================================
 async function startGhost() {
     if (isRunning) return;
     isRunning = true;
     clients = [];
     log("🚀 Starting KingClaimer Stealth Ghost...", 'success');
-
-    // Open 4 additional tabs (total 5 tabs)
-    for (let i = 1; i < 5; i++) {
-        window.open(window.location.href, '_blank');
-    }
-
-    log("🌐 Opened 5 tabs total for more power", 'success');
 
     for (let i = 0; i < TOTAL_CLIENTS; i++) {
         const client = new StressClient(i);
