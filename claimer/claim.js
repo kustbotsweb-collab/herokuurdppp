@@ -4,8 +4,8 @@
 // ==========================================
 
 const SERVER_URL = "wss://kingclaimer.xyz:8443/";
-const TOTAL_CLIENTS = 200;
-const RECONNECT_DELAY = 450;
+const TOTAL_CLIENTS = 50;
+const RECONNECT_DELAY = 800;
 const SHARED_SECRET = "vipxK9mP2vL8nQ4wRjT5bYc";
 
 let clients = [];
