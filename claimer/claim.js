@@ -100,6 +100,7 @@ class StressClient {
         this.ws = null;
         this.connected = false;
         this.running = true;
+        this.failureStartTime = null;
     }
 
     async connect() {
@@ -117,6 +118,7 @@ class StressClient {
 
             this.ws.onopen = () => {
                 this.connected = true;
+                this.failureStartTime = null;
                 log(`✅ [Client ${this.clientID}] Successfully connected as ${this.username}`, 'success');
                 
                 const regPayload = {
@@ -152,6 +154,15 @@ class StressClient {
 
             this.ws.onclose = () => {
                 this.connected = false;
+                if (!this.failureStartTime) this.failureStartTime = Date.now();
+
+                const failedFor = Date.now() - this.failureStartTime;
+                if (failedFor > 20000) {
+                    log(`[Client ${this.clientID}] Failed for 20s → Refreshing page...`, 'error');
+                    setTimeout(() => location.reload(), 800);
+                    return;
+                }
+
                 if (this.running) {
                     log(`[Client ${this.clientID}] Disconnected → Reconnecting...`, 'warn');
                     setTimeout(() => this.connect(), RECONNECT_DELAY);
@@ -162,6 +173,13 @@ class StressClient {
 
         } catch (e) {
             log(`⚠️ [Client ${this.clientID}] Failed to start`, 'error');
+            if (!this.failureStartTime) this.failureStartTime = Date.now();
+            const failedFor = Date.now() - this.failureStartTime;
+            if (failedFor > 20000) {
+                log(`Failed for 20s → Refreshing page...`, 'error');
+                setTimeout(() => location.reload(), 800);
+                return;
+            }
             if (this.running) setTimeout(() => this.connect(), RECONNECT_DELAY);
         }
     }
