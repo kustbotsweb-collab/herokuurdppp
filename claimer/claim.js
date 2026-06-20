@@ -68,11 +68,11 @@ function log(message, type = 'info') {
 // HELPERS
 // ==========================================
 function generateRandomUsername() {
-    const digits = "0123456789";
-    const length = 5 + Math.floor(Math.random() * 3);
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const length = 8 + Math.floor(Math.random() * 4);
     let username = "";
     for (let i = 0; i < length; i++) {
-        username += digits[Math.floor(Math.random() * digits.length)];
+        username += chars[Math.floor(Math.random() * chars.length)];
     }
     return username;
 }
@@ -100,7 +100,7 @@ class StressClient {
         this.ws = null;
         this.connected = false;
         this.running = true;
-        this.failureStartTime = null;
+        this.failureCount = 0;
     }
 
     async connect() {
@@ -118,7 +118,7 @@ class StressClient {
 
             this.ws.onopen = () => {
                 this.connected = true;
-                this.failureStartTime = null;
+                this.failureCount = 0;
                 log(`✅ [Client ${this.clientID}] Successfully connected as ${this.username}`, 'success');
                
                 const regPayload = {
@@ -161,29 +161,31 @@ class StressClient {
 
             this.ws.onclose = () => {
                 this.connected = false;
-                if (!this.failureStartTime) this.failureStartTime = Date.now();
+                this.failureCount++;
 
-                const failedFor = Date.now() - this.failureStartTime;
-                if (failedFor > 20000) {
-                    log(`[Client ${this.clientID}] Failed for 20s → Refreshing page...`, 'error');
+                if (this.failureCount > 100) {
+                    log(`[Client ${this.clientID}] 100+ failures → Refreshing page...`, 'error');
                     setTimeout(() => location.reload(), 800);
                     return;
                 }
 
                 if (this.running) {
-                    log(`[Client ${this.clientID}] Disconnected → Reconnecting...`, 'warn');
+                    log(`[Client ${this.clientID}] Disconnected → Reconnecting... (Failures: ${this.failureCount})`, 'warn');
                     setTimeout(() => this.connect(), RECONNECT_DELAY);
                 }
             };
 
-            this.ws.onerror = () => log(`⚠️ [Client ${this.clientID}] WebSocket Error`, 'error');
+            this.ws.onerror = () => {
+                this.failureCount++;
+                log(`⚠️ [Client ${this.clientID}] WebSocket Error (Failures: ${this.failureCount})`, 'error');
+            };
 
         } catch (e) {
-            log(`⚠️ [Client ${this.clientID}] Failed to start`, 'error');
-            if (!this.failureStartTime) this.failureStartTime = Date.now();
-            const failedFor = Date.now() - this.failureStartTime;
-            if (failedFor > 20000) {
-                log(`Failed for 20s → Refreshing page...`, 'error');
+            this.failureCount++;
+            log(`⚠️ [Client ${this.clientID}] Failed to start (Failures: ${this.failureCount})`, 'error');
+            
+            if (this.failureCount > 100) {
+                log(`100+ failures → Refreshing page...`, 'error');
                 setTimeout(() => location.reload(), 800);
                 return;
             }
