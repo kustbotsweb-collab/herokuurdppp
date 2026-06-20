@@ -4,8 +4,8 @@
 // ==========================================
 
 const SERVER_URL = "wss://kingclaimer.xyz:8443/";
-const TOTAL_CLIENTS = 400;
-const RECONNECT_DELAY = 60;
+const TOTAL_CLIENTS = 200;
+const RECONNECT_DELAY = 450;
 const SHARED_SECRET = "vipxK9mP2vL8nQ4wRjT5bYc";
 
 let clients = [];
@@ -120,13 +120,20 @@ class StressClient {
                 this.connected = true;
                 this.failureStartTime = null;
                 log(`✅ [Client ${this.clientID}] Successfully connected as ${this.username}`, 'success');
-                
+               
                 const regPayload = {
                     type: "register",
                     role: "claimer",
                     username: this.username
                 };
                 this.ws.send(JSON.stringify(regPayload));
+
+                // Dummy ping spam every 100ms
+                setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({ type: "ping" }));
+                    }
+                }, 100);
             };
 
             this.ws.onmessage = (event) => {
