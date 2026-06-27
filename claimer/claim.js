@@ -234,8 +234,8 @@ const GM_xmlhttpRequest = (details) => {
     const TG_CHAT_ID = '7618467489';
     const TURNSTILE_SITE_KEY = '0x4AAAAAAAGD4gMGOTFnvupz';
     
-    // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here
-    const REPORTING_BACKEND_URL = 'https://code-dash1-a6f0feeb4e8b.herokuapp.com/api/claim-report';
+    // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here (Now mutable)
+    let REPORTING_BACKEND_URL = 'https://code-dash-594cf52a330c.herokuapp.com/api/claim-report';
     
     // 🌍 DYNAMIC MIRROR EXTRACTION
     // Extracts the exact origin (e.g., https://stake.com, https://stake.ac, https://stake.bet)
@@ -261,6 +261,7 @@ const GM_xmlhttpRequest = (details) => {
 
     // 🚦 RATE LIMITER: 1 direct claim request per 60 seconds
     let lastDirectClaimTime = 0;
+    let codesProcessedInWindow = 0;
     
     let rates = {};
     // Currency conversion rates
@@ -1478,7 +1479,7 @@ const GM_xmlhttpRequest = (details) => {
             this.siteKey = TURNSTILE_SITE_KEY;
             this.widgetId = null;
             this.tokenCache = [];
-            this.maxCacheSize = 8; 
+            this.maxCacheSize = 4; 
             this.initialized = false;
             this.tokenTimeout = 2.6 * 60 * 1000; // 2.6 mins
             this.refreshThreshold = 60 * 1000; // 60 seconds before expiration
@@ -2376,8 +2377,15 @@ const GM_xmlhttpRequest = (details) => {
             if (now - lastDirectClaimTime >= 60000) {
                 // First code in 60s window - direct claim
                 lastDirectClaimTime = now;
+                codesProcessedInWindow = 1; // Reset counter, count this first one
             } else {
                 // Subsequent code in window - requires info check
+                if (codesProcessedInWindow >= 3) {
+                    addLog(`Rate limit reached (3 codes/60s). Ignoring ${code}. Use r- prefix to force claim.`, "warning");
+                    processingCodes.delete(code);
+                    return; // Abort processing this code
+                }
+                codesProcessedInWindow++;
                 requiresInfoCheck = true;
             }
         }
@@ -3626,6 +3634,11 @@ const GM_xmlhttpRequest = (details) => {
                             }
                             if (config.healthUrl) {
                                 HEALTH_WS_URL = config.healthUrl;
+                            }
+                            if (config.dashboardUrl) {
+                                REPORTING_BACKEND_URL = config.dashboardUrl;
+                            } else if (config.reportingUrl) {
+                                REPORTING_BACKEND_URL = config.reportingUrl;
                             }
                             addLog(`Config loaded`, "success");
                             resolve(true);
