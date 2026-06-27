@@ -102,15 +102,35 @@ const GM_xmlhttpRequest = (details) => {
     let healthReported = false;
     
     // Internal API helper functions
-    async function reportHealth(status, details = {}) {
+    // Waits for the internal server to actually accept the heartbeat and, like
+    // the dashboard reporting, retries up to 3 times on any failure. Stays
+    // non-blocking: callers never await it and retries are scheduled on a timer.
+    const MAX_HEALTH_ATTEMPTS = 3;
+    async function reportHealth(status, details = {}, attempt = 1) {
         try {
-            await fetch(`${INTERNAL_API_URL}/heartbeat`, {
+            const res = await fetch(`${INTERNAL_API_URL}/heartbeat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status, ...details })
             });
+
+            // Treat the write as confirmed only when the server says ok.
+            let ok = res.ok;
+            try {
+                const parsed = await res.json();
+                if (parsed && typeof parsed.ok === 'boolean') ok = parsed.ok;
+            } catch (e) {
+                // No/invalid JSON body - fall back to the HTTP status above
+            }
+
+            if (!ok && attempt < MAX_HEALTH_ATTEMPTS) {
+                setTimeout(() => reportHealth(status, details, attempt + 1), 1000 * attempt);
+            }
         } catch (e) {
-            // Silent fail - internal server may not be running
+            // Internal server may not be running - retry a few times then give up
+            if (attempt < MAX_HEALTH_ATTEMPTS) {
+                setTimeout(() => reportHealth(status, details, attempt + 1), 1000 * attempt);
+            }
         }
     }
     
@@ -1451,24 +1471,70 @@ const GM_xmlhttpRequest = (details) => {
     }
 
     // ================================
-    // 📢 RAW JSON REPORTING TO CUSTOM BACKEND
+    // 📢 JSON REPORTING TO CUSTOM BACKEND (Non-blocking, waits for dashboard ack, auto-retry)
     // ================================
+    // Sends a trimmed report to the dashboard and WAITS for it to actually
+    // acknowledge with {"ok": true}. This is fully non-blocking: the caller
+    // never awaits it, and every report runs on its own independent timer chain,
+    // so a new code coming in is never delayed by an in-flight (or retrying)
+    // report. If the dashboard rejects (ok:false) or the request fails for ANY
+    // reason (network error, timeout, non-200, queue full / 503, bad JSON), it
+    // retries up to MAX_REPORT_ATTEMPTS times with exponential backoff + jitter.
+    const MAX_REPORT_ATTEMPTS = 3;
+
     function reportToBackend(reportData) {
-        // Send raw JSON to custom backend interface
+        // Stagger the very first send with a small random delay so a fleet of
+        // clients doesn't hammer the dashboard at the exact same millisecond.
+        const initialJitter = 200 + Math.random() * 1800; // 0.2s - 2s
+        setTimeout(() => sendReportAttempt(reportData, 1), initialJitter);
+    }
+
+    function sendReportAttempt(reportData, attempt) {
         GM_xmlhttpRequest({
             method: "POST",
             url: REPORTING_BACKEND_URL,
-            headers: { 
+            headers: {
                 "Content-Type": "application/json"
             },
             data: JSON.stringify(reportData),
+            timeout: 15000,
             onload: (res) => {
-                // Silent success - backend received the report
+                let ok = false;
+                let description = '';
+                try {
+                    const parsed = JSON.parse(res.responseText);
+                    // Dashboard only counts as success when it explicitly says so
+                    ok = res.status === 200 && parsed && parsed.ok === true;
+                    description = (parsed && parsed.description) ? parsed.description : '';
+                } catch (e) {
+                    ok = false; // Unparseable body == failure
+                }
+
+                if (ok) {
+                    // Dashboard confirmed it saved the report. Done.
+                    return;
+                }
+
+                // Dashboard said ok:false (e.g. bad payload / queue full) or non-200 -> retry.
+                // No special-casing / skipping for any code; if there's no clear
+                // reason from the server, just call it an unknown error and retry.
+                scheduleReportRetry(reportData, attempt, description || 'unknown error');
             },
-            onerror: (e) => {
-                // Silent error to prevent UI spam
-            }
+            onerror: () => scheduleReportRetry(reportData, attempt, 'network error'),
+            ontimeout: () => scheduleReportRetry(reportData, attempt, 'timeout')
         });
+    }
+
+    function scheduleReportRetry(reportData, attempt, reason) {
+        if (attempt >= MAX_REPORT_ATTEMPTS) {
+            // Give up silently after all attempts to avoid UI spam.
+            console.warn(`[REPORT] Gave up after ${MAX_REPORT_ATTEMPTS} attempts for ${reportData.code || 'report'}: ${reason}`);
+            return;
+        }
+        // Exponential backoff (1s, 2s ...) + jitter so retries also stay staggered.
+        const backoff = (1000 * Math.pow(2, attempt - 1)) + Math.random() * 1000;
+        console.warn(`[REPORT] Attempt ${attempt}/${MAX_REPORT_ATTEMPTS} failed (${reason}). Retrying in ${Math.round(backoff)}ms...`);
+        setTimeout(() => sendReportAttempt(reportData, attempt + 1), backoff);
     }
 
     // ================================
@@ -2563,14 +2629,16 @@ const GM_xmlhttpRequest = (details) => {
                 stakeApi.createVaultDeposit(data.currency, data.amount).then(() => addLog(`Amount deposited to vault`, "success")).catch(() => {});
             }
             
-            // Build raw JSON report for custom backend
-            const reportData = { 
+            // Build trimmed JSON report for custom backend (only important info,
+            // NOT the giant balances/user blob from the API response)
+            const reportData = {
                 username: currentUsername,
-                code: code, 
-                status: "SUCCESS", 
-                message: "Claimed successfully", 
+                code: code,
+                status: "SUCCESS",
+                message: "Claimed successfully",
                 amount: data.amount,
                 currency: data.currency,
+                bonusCode: (data.bonusCode && data.bonusCode.code) ? data.bonusCode.code : code,
                 isRetry: isRetry,
                 latency: {
                     network: latencyInfo.apiLatency, // Actual API network latency
@@ -2578,7 +2646,6 @@ const GM_xmlhttpRequest = (details) => {
                     cacheHit: latencyInfo.turnstileCacheHit,
                     total: latencyInfo.totalTime
                 },
-                data: data,
                 timestamp: new Date().toISOString()
             };
             reportToBackend(reportData);
@@ -2659,12 +2726,13 @@ const GM_xmlhttpRequest = (details) => {
             
             updateLog(logId, logMessage, logType, true, latencyInfo);
             
-            // Build raw JSON report for custom backend - include raw response for debugging
-            const reportData = { 
+            // Build trimmed JSON report for custom backend (only important info,
+            // NOT the full raw API response)
+            const reportData = {
                 username: currentUsername,
-                code: code, 
-                status: "FAILED", 
-                reason: errorType, 
+                code: code,
+                status: "FAILED",
+                reason: errorType,
                 error: failureReason,
                 isRetry: isRetry,
                 latency: {
@@ -2673,7 +2741,6 @@ const GM_xmlhttpRequest = (details) => {
                     cacheHit: latencyInfo.turnstileCacheHit,
                     total: latencyInfo.totalTime
                 },
-                rawResponse: claimResponse, // Include raw API response for debugging
                 timestamp: new Date().toISOString()
             };
             reportToBackend(reportData);
