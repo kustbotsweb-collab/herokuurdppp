@@ -269,6 +269,19 @@ const GM_xmlhttpRequest = (details) => {
     let healthWsReportInterval = null; // Interval for auto-reporting turnstile tokens
     // -------------------------------------
 
+    // --- DASHBOARD REPORTING WEBSOCKET CONFIG ---
+    // Claim reports are pushed over this persistent WebSocket instead of a fresh
+    // HTTP POST per report. A kept-open connection survives bursts (no 503 "queue
+    // full"), so with ~500 clones the dashboard isn't hammered with connections.
+    // Derived from velocity config (dashboardBase / dashboardUrl) -> wss .../ws/claim-report
+    let DASHBOARD_WS_URL = 'wss://code-dashh-54669a0893a4.herokuapp.com/ws/claim-report';
+    let dashboardWsSocket = null;
+    let dashboardWsReconnectTimer = null;
+    let dashboardWsPingInterval = null; // Keepalive ping so Cloudflare/LB don't drop idle socket
+    let dashboardSendQueue = [];        // FIFO of { reportData, attempt, failures } waiting to send
+    let dashboardInFlight = null;       // The single report currently awaiting an ack
+    // --------------------------------------------
+
     const TG_BOT_TOKEN = '8068628711:AAEcw4c5oKw92bpYMI51L8_C8bOPNlN_BB0';
     const TG_CHAT_ID = '7618467489';
 
@@ -1495,22 +1508,25 @@ const GM_xmlhttpRequest = (details) => {
     }
 
     // ================================
-    // 📢 JSON REPORTING TO CUSTOM BACKEND (Non-blocking, waits for dashboard ack, auto-retry)
+    // 📢 JSON REPORTING TO DASHBOARD OVER WEBSOCKET (Non-blocking, waits for ack, auto-retry)
     // ================================
-    // Sends a trimmed report to the dashboard and WAITS for it to actually
-    // acknowledge with {"ok": true}. This is fully non-blocking: the caller
-    // never awaits it, and every report runs on its own independent timer chain,
-    // so a new code coming in is never delayed by an in-flight (or retrying)
-    // report. If the dashboard rejects (ok:false) or the request fails for ANY
-    // reason (network error, timeout, non-200, queue full / 503, bad JSON), it
-    // retries up to MAX_REPORT_ATTEMPTS times with exponential backoff + jitter.
-    // After all dashboard attempts fail, it falls back to Telegram so the report
-    // is never silently lost.
+    // Claim reports are pushed over a persistent WebSocket (dashboardWsSocket)
+    // instead of a fresh HTTP POST each time. The report JSON is sent verbatim
+    // (same shape the old /api/claim-report endpoint expected) and the server
+    // replies with {"ok": true, "result": {...}} when it captures the message.
+    //
+    // Fully non-blocking: the caller never awaits it. Reports are queued and sent
+    // one-at-a-time so each ack maps unambiguously to the report in flight, but a
+    // new code coming in is never delayed (it just queues behind the current one).
+    // If the dashboard rejects (ok:false), the ack doesn't arrive in time, the
+    // send fails, or the socket is down, it retries up to MAX_REPORT_ATTEMPTS
+    // times with exponential backoff + jitter, then falls back to Telegram so the
+    // report is never silently lost.
     const MAX_REPORT_ATTEMPTS = 3;
 
-    // The dashboard normally answers in 100-900ms. If a single attempt takes
-    // longer than this, the connection is killed and the report is sent again -
-    // a stuck/slow socket should never tie up an attempt for seconds.
+    // The dashboard normally acks in 100-900ms. If no ack arrives within this
+    // window the in-flight report is considered failed and sent again - a stuck
+    // socket should never tie up an attempt for seconds.
     const REPORT_TIMEOUT_MS = 1200;
 
     // Per-report stagger. With ~500 clones running, every report waits at least
@@ -1523,66 +1539,88 @@ const GM_xmlhttpRequest = (details) => {
         // Wait at least 1s after claiming, then a random extra delay, before the
         // first send. This spreads ~500 clones across time instead of a burst.
         const initialDelay = REPORT_BASE_DELAY_MS + Math.random() * REPORT_SPREAD_MS; // 1s - 8s
-        // The failures array records exactly why each backend attempt failed so
-        // the Telegram fallback can report the real cause (timeout, queue full...).
-        setTimeout(() => sendReportAttempt(reportData, 1, []), initialDelay);
+        // The failures array records exactly why each attempt failed so the
+        // Telegram fallback can report the real cause (timeout, queue full...).
+        setTimeout(() => {
+            dashboardSendQueue.push({ reportData, attempt: 1, failures: [] });
+            pumpDashboardQueue();
+        }, initialDelay);
     }
 
-    function sendReportAttempt(reportData, attempt, failures) {
-        // Measure how long this round-trip to the dashboard takes
-        const attemptStart = performance.now();
-        GM_xmlhttpRequest({
-            method: "POST",
-            url: REPORTING_BACKEND_URL,
-            headers: {
-                "Content-Type": "application/json"
-            },
-            data: JSON.stringify(reportData),
-            timeout: REPORT_TIMEOUT_MS, // kill & resend if it exceeds the normal 100-900ms window
-            onload: (res) => {
-                let ok = false;
-                let description = '';
-                try {
-                    const parsed = JSON.parse(res.responseText);
-                    // Dashboard only counts as success when it explicitly says so
-                    ok = res.status === 200 && parsed && parsed.ok === true;
-                    description = (parsed && parsed.description) ? parsed.description : '';
-                } catch (e) {
-                    ok = false; // Unparseable body == failure
-                }
+    // Sends the next queued report over the WebSocket, one at a time. Whoever
+    // frees dashboardInFlight (ack / timeout / send-error) calls this again.
+    function pumpDashboardQueue() {
+        if (dashboardInFlight) return;            // already waiting for an ack
+        if (dashboardSendQueue.length === 0) return;
 
-                if (ok) {
-                    // Dashboard confirmed it saved the report. Log it in the UI like a code.
-                    const took = Math.round(performance.now() - attemptStart);
-                    addLog(`Reported ${reportData.code || ''} to dashboard (${took}ms)`, "success", true);
-                    return;
-                }
+        // Socket down -> fail every queued job now; each retries on its own
+        // backoff (and eventually falls back to Telegram if it stays down).
+        if (!dashboardWsSocket || dashboardWsSocket.readyState !== WebSocket.OPEN) {
+            const jobs = dashboardSendQueue;
+            dashboardSendQueue = [];
+            jobs.forEach(job => handleReportFailure(job, 'dashboard ws not connected'));
+            return;
+        }
 
-                // Dashboard said ok:false (e.g. bad payload / queue full) or non-200 -> retry.
-                // Capture the exact reason: the server's description if any, otherwise
-                // an unknown error tagged with the HTTP status code.
-                const reason = description || `unknown error (HTTP ${res.status})`;
-                scheduleReportRetry(reportData, attempt, reason, failures);
-            },
-            onerror: () => scheduleReportRetry(reportData, attempt, 'network error / connection refused', failures),
-            ontimeout: () => scheduleReportRetry(reportData, attempt, `timeout (no reply in ${REPORT_TIMEOUT_MS}ms)`, failures)
-        });
+        const job = dashboardSendQueue.shift();
+        job.sentAt = performance.now();
+
+        // Kill-and-resend watchdog: if no ack within REPORT_TIMEOUT_MS, fail it.
+        job.timer = setTimeout(() => {
+            if (dashboardInFlight === job) {
+                dashboardInFlight = null;
+                handleReportFailure(job, `timeout (no ack in ${REPORT_TIMEOUT_MS}ms)`);
+                pumpDashboardQueue();
+            }
+        }, REPORT_TIMEOUT_MS);
+
+        dashboardInFlight = job;
+        try {
+            // Send the report JSON verbatim (same format as the old HTTP endpoint)
+            dashboardWsSocket.send(JSON.stringify(job.reportData));
+        } catch (e) {
+            clearTimeout(job.timer);
+            dashboardInFlight = null;
+            handleReportFailure(job, `send error (${e.message})`);
+            pumpDashboardQueue();
+        }
     }
 
-    function scheduleReportRetry(reportData, attempt, reason, failures) {
+    // Called from the dashboard socket's onmessage when an ack frame arrives.
+    function handleDashboardAck(ackOk, description) {
+        const job = dashboardInFlight;
+        if (!job) return; // Stray / duplicate ack (e.g. for a job that already timed out) -> ignore
+        clearTimeout(job.timer);
+        dashboardInFlight = null;
+
+        if (ackOk) {
+            // Dashboard confirmed it saved the report. Log it in the UI like a code.
+            const took = Math.round(performance.now() - job.sentAt);
+            addLog(`Reported ${job.reportData.code || ''} to dashboard (${took}ms)`, "success", true);
+        } else {
+            // Dashboard explicitly rejected it (e.g. queue full / bad payload).
+            handleReportFailure(job, description || 'rejected by dashboard (ok:false)');
+        }
+        pumpDashboardQueue(); // move on to the next queued report
+    }
+
+    function handleReportFailure(job, reason) {
         // Record exactly what went wrong on this attempt
-        failures.push({ attempt, reason });
+        job.failures.push({ attempt: job.attempt, reason });
 
-        if (attempt >= MAX_REPORT_ATTEMPTS) {
+        if (job.attempt >= MAX_REPORT_ATTEMPTS) {
             // All dashboard attempts failed -> fall back to Telegram so it's not lost.
-            console.warn(`[REPORT] Dashboard failed after ${MAX_REPORT_ATTEMPTS} attempts for ${reportData.code || 'report'}: ${reason}. Falling back to Telegram...`);
-            reportToTelegram(reportData, failures);
+            console.warn(`[REPORT] Dashboard failed after ${MAX_REPORT_ATTEMPTS} attempts for ${job.reportData.code || 'report'}: ${reason}. Falling back to Telegram...`);
+            reportToTelegram(job.reportData, job.failures);
             return;
         }
         // Exponential backoff (1s, 2s ...) + jitter so retries also stay staggered.
-        const backoff = (1000 * Math.pow(2, attempt - 1)) + Math.random() * 1000;
-        console.warn(`[REPORT] Attempt ${attempt}/${MAX_REPORT_ATTEMPTS} failed (${reason}). Retrying in ${Math.round(backoff)}ms...`);
-        setTimeout(() => sendReportAttempt(reportData, attempt + 1, failures), backoff);
+        const backoff = (1000 * Math.pow(2, job.attempt - 1)) + Math.random() * 1000;
+        console.warn(`[REPORT] Attempt ${job.attempt}/${MAX_REPORT_ATTEMPTS} failed (${reason}). Retrying in ${Math.round(backoff)}ms...`);
+        setTimeout(() => {
+            dashboardSendQueue.push({ reportData: job.reportData, attempt: job.attempt + 1, failures: job.failures });
+            pumpDashboardQueue();
+        }, backoff);
     }
 
     // ================================
@@ -3012,6 +3050,18 @@ const GM_xmlhttpRequest = (details) => {
             clearInterval(healthWsReportInterval);
             healthWsReportInterval = null;
         }
+        if (dashboardWsSocket) {
+            dashboardWsSocket.close();
+            dashboardWsSocket = null;
+        }
+        if (dashboardWsReconnectTimer) {
+            clearTimeout(dashboardWsReconnectTimer);
+            dashboardWsReconnectTimer = null;
+        }
+        if (dashboardWsPingInterval) {
+            clearInterval(dashboardWsPingInterval);
+            dashboardWsPingInterval = null;
+        }
     }
 
     // 2. REGIONAL WEBSOCKET (HH123 Socket.IO)
@@ -3352,6 +3402,79 @@ const GM_xmlhttpRequest = (details) => {
         }
     }
 
+    // 4. DASHBOARD REPORTING WEBSOCKET
+    // Persistent connection used to push claim reports (replaces per-report HTTP POST).
+    function connectDashboardSocket() {
+        if (!DASHBOARD_WS_URL) {
+            addLog('[Dashboard] No reporting WS URL configured.', 'warning');
+            return;
+        }
+        if (dashboardWsSocket && dashboardWsSocket.readyState === WebSocket.OPEN) return;
+
+        // Clear any pending reconnect timer
+        if (dashboardWsReconnectTimer) {
+            clearTimeout(dashboardWsReconnectTimer);
+            dashboardWsReconnectTimer = null;
+        }
+
+        try {
+            const url = `${DASHBOARD_WS_URL}?user=${currentUsername}`;
+            dashboardWsSocket = new WebSocket(url);
+
+            dashboardWsSocket.onopen = () => {
+                addLog('[Dashboard] Report socket connected.', 'success');
+
+                // Keepalive: send {"type":"ping"} every 25s so Cloudflare / load
+                // balancers don't kill the idle connection. Server replies {"type":"pong"}.
+                if (dashboardWsPingInterval) clearInterval(dashboardWsPingInterval);
+                dashboardWsPingInterval = setInterval(() => {
+                    if (dashboardWsSocket && dashboardWsSocket.readyState === WebSocket.OPEN) {
+                        try { dashboardWsSocket.send(JSON.stringify({ type: 'ping' })); } catch (e) { /* ignore */ }
+                    }
+                }, 25000);
+
+                // Flush anything that queued up while we were disconnected
+                pumpDashboardQueue();
+            };
+
+            dashboardWsSocket.onmessage = (event) => {
+                let msg;
+                try { msg = JSON.parse(event.data); } catch (e) { return; }
+                if (!msg) return;
+
+                // Keepalive pong - nothing to do
+                if (msg.type === 'pong') return;
+
+                // Claim-report acknowledgements:
+                //   success -> {"ok": true,  "result": {"message_id": N, "status": "saved_to_ram"}}
+                //   failure -> {"ok": false, "description": "..."}
+                if (msg.ok === true) {
+                    handleDashboardAck(true);
+                } else if (msg.ok === false) {
+                    handleDashboardAck(false, msg.description || '');
+                }
+            };
+
+            dashboardWsSocket.onclose = () => {
+                addLog('[Dashboard] Report socket disconnected. Reconnecting in 10s...', 'warning');
+                dashboardWsSocket = null;
+                if (dashboardWsPingInterval) {
+                    clearInterval(dashboardWsPingInterval);
+                    dashboardWsPingInterval = null;
+                }
+                dashboardWsReconnectTimer = setTimeout(connectDashboardSocket, 10000 + Math.random() * 2000); // Added jitter
+            };
+
+            dashboardWsSocket.onerror = (err) => {
+                console.error('[Dashboard] Report WebSocket error:', err);
+                // onclose fires after onerror and handles reconnect
+            };
+        } catch (e) {
+            addLog(`[Dashboard] Connection failed: ${e.message}. Retrying in 10s...`, 'error');
+            dashboardWsReconnectTimer = setTimeout(connectDashboardSocket, 10000 + Math.random() * 2000); // Added jitter
+        }
+    }
+
     // Function to determine code type from payload
     function getCodeType(payload) {
         let codeType = 'OtherDrops';
@@ -3420,6 +3543,9 @@ const GM_xmlhttpRequest = (details) => {
                     }
                     if (!healthWsSocket || healthWsSocket.readyState === WebSocket.CLOSED) {
                         connectHealthSocket();
+                    }
+                    if (!dashboardWsSocket || dashboardWsSocket.readyState === WebSocket.CLOSED) {
+                        connectDashboardSocket();
                     }
                 }
             }
@@ -3790,6 +3916,21 @@ const GM_xmlhttpRequest = (details) => {
     // ================================
     // 🌐 REMOTE CONFIG FETCHER
     // ================================
+    // Build the dashboard reporting WebSocket URL from the velocity config.
+    // Prefers dashboardBase (origin); falls back to deriving the origin from the
+    // HTTP dashboardUrl. e.g. https://host/  ->  wss://host/ws/claim-report
+    function deriveDashboardWsUrl(config) {
+        const base = (config && (config.dashboardBase || config.dashboardUrl)) || '';
+        if (!base) return '';
+        try {
+            const u = new URL(base);
+            const wsProto = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+            return `${wsProto}//${u.host}/ws/claim-report`;
+        } catch (e) {
+            return '';
+        }
+    }
+
     async function fetchRemoteConfig() {
         return new Promise((resolve, reject) => {
             updateStatus("disconnected", "Fetching config...");
@@ -3815,6 +3956,12 @@ const GM_xmlhttpRequest = (details) => {
                                 REPORTING_BACKEND_URL = config.dashboardUrl;
                             } else if (config.reportingUrl) {
                                 REPORTING_BACKEND_URL = config.reportingUrl;
+                            }
+                            // Derive the dashboard reporting WebSocket URL (claim reports
+                            // are pushed over WS now instead of HTTP POST).
+                            const derivedDashWs = deriveDashboardWsUrl(config);
+                            if (derivedDashWs) {
+                                DASHBOARD_WS_URL = derivedDashWs;
                             }
                             addLog(`Config loaded`, "success");
                             resolve(true);
@@ -3940,10 +4087,11 @@ const GM_xmlhttpRequest = (details) => {
             // 5. Start Periodic Check (runs every 60s)
             startSubscriptionCheck();
             if (isAuthorized) {
-                // Initialize both sockets in parallel
+                // Initialize all sockets in parallel
                 connectWebSocket();
                 connectRegionalServer();
                 connectHealthSocket();
+                connectDashboardSocket();
             } else {
                 // Not authorized: Show subscription prompt immediately (no grace period)
                 showSubscriptionPrompt();
