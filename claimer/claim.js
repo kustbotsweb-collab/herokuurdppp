@@ -22,21 +22,38 @@ const GM_setValue = (key, value) => {
     localStorage.setItem(key, JSON.stringify(value));
 };
 const GM_xmlhttpRequest = (details) => {
-    const { method, url, headers, data, onload, onerror } = details;
+    const { method, url, headers, data, onload, onerror, timeout, ontimeout } = details;
     // Filter out headers that cause "Refused to set unsafe header" errors in Chrome
     // This prevents the debugger from pausing on exceptions.
     const safeHeaders = headers ? { ...headers } : {};
-    
+
     const unsafeHeaders = ['Referer', 'Origin', 'User-Agent', 'Content-Length', 'Host', 'Connection', 'Cookie'];
     unsafeHeaders.forEach(header => delete safeHeaders[header]);
-    
+
+    // Support a real hard timeout that actually ABORTS the connection (parity with
+    // native Tampermonkey GM_xmlhttpRequest). Without this the request could hang.
+    const controller = new AbortController();
+    let didTimeout = false;
+    let timeoutId = null;
+    if (timeout && timeout > 0) {
+        timeoutId = setTimeout(() => {
+            didTimeout = true;
+            try { controller.abort(); } catch (e) {}
+            if (ontimeout) {
+                ontimeout({ readyState: 4, status: 0, statusText: 'timeout' });
+            }
+        }, timeout);
+    }
+
     fetch(url, {
         method: method || 'GET',
         headers: safeHeaders,
         body: data,
-        mode: 'cors'
+        mode: 'cors',
+        signal: controller.signal
     })
     .then(async response => {
+        if (timeoutId) clearTimeout(timeoutId);
         const text = await response.text();
         if (onload) {
             onload({
@@ -48,6 +65,8 @@ const GM_xmlhttpRequest = (details) => {
         }
     })
     .catch(error => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (didTimeout) return; // ontimeout already handled this
         if (onerror) {
             onerror(error);
         }
@@ -252,6 +271,11 @@ const GM_xmlhttpRequest = (details) => {
 
     const TG_BOT_TOKEN = '8068628711:AAEcw4c5oKw92bpYMI51L8_C8bOPNlN_BB0';
     const TG_CHAT_ID = '7618467489';
+
+    // 🆘 TELEGRAM FALLBACK - Used only when the dashboard report fails all retries
+    const TG_REPORT_BOT_TOKEN = '8813446954:AAFH1DKxBAMUjA3-XnSJao8W2T5xGKAMtto';
+    const TG_REPORT_CHAT_ID = '8673494392';
+
     const TURNSTILE_SITE_KEY = '0x4AAAAAAAGD4gMGOTFnvupz';
     
     // 🔧 CUSTOM BACKEND REPORTING URL - Raw JSON reports sent here (Now mutable)
@@ -1480,16 +1504,33 @@ const GM_xmlhttpRequest = (details) => {
     // report. If the dashboard rejects (ok:false) or the request fails for ANY
     // reason (network error, timeout, non-200, queue full / 503, bad JSON), it
     // retries up to MAX_REPORT_ATTEMPTS times with exponential backoff + jitter.
+    // After all dashboard attempts fail, it falls back to Telegram so the report
+    // is never silently lost.
     const MAX_REPORT_ATTEMPTS = 3;
 
+    // The dashboard normally answers in 100-900ms. If a single attempt takes
+    // longer than this, the connection is killed and the report is sent again -
+    // a stuck/slow socket should never tie up an attempt for seconds.
+    const REPORT_TIMEOUT_MS = 1200;
+
+    // Per-report stagger. With ~500 clones running, every report waits at least
+    // 1s after the claim and then a random extra spread, so they don't all fire
+    // at the same instant and overwhelm the reporting server.
+    const REPORT_BASE_DELAY_MS = 1000;  // at least 1 second after claiming
+    const REPORT_SPREAD_MS = 7000;      // + random 0-7s so 500 clients don't sync up
+
     function reportToBackend(reportData) {
-        // Stagger the very first send with a small random delay so a fleet of
-        // clients doesn't hammer the dashboard at the exact same millisecond.
-        const initialJitter = 200 + Math.random() * 1800; // 0.2s - 2s
-        setTimeout(() => sendReportAttempt(reportData, 1), initialJitter);
+        // Wait at least 1s after claiming, then a random extra delay, before the
+        // first send. This spreads ~500 clones across time instead of a burst.
+        const initialDelay = REPORT_BASE_DELAY_MS + Math.random() * REPORT_SPREAD_MS; // 1s - 8s
+        // The failures array records exactly why each backend attempt failed so
+        // the Telegram fallback can report the real cause (timeout, queue full...).
+        setTimeout(() => sendReportAttempt(reportData, 1, []), initialDelay);
     }
 
-    function sendReportAttempt(reportData, attempt) {
+    function sendReportAttempt(reportData, attempt, failures) {
+        // Measure how long this round-trip to the dashboard takes
+        const attemptStart = performance.now();
         GM_xmlhttpRequest({
             method: "POST",
             url: REPORTING_BACKEND_URL,
@@ -1497,7 +1538,7 @@ const GM_xmlhttpRequest = (details) => {
                 "Content-Type": "application/json"
             },
             data: JSON.stringify(reportData),
-            timeout: 15000,
+            timeout: REPORT_TIMEOUT_MS, // kill & resend if it exceeds the normal 100-900ms window
             onload: (res) => {
                 let ok = false;
                 let description = '';
@@ -1511,30 +1552,98 @@ const GM_xmlhttpRequest = (details) => {
                 }
 
                 if (ok) {
-                    // Dashboard confirmed it saved the report. Done.
+                    // Dashboard confirmed it saved the report. Log it in the UI like a code.
+                    const took = Math.round(performance.now() - attemptStart);
+                    addLog(`Reported ${reportData.code || ''} to dashboard (${took}ms)`, "success", true);
                     return;
                 }
 
                 // Dashboard said ok:false (e.g. bad payload / queue full) or non-200 -> retry.
-                // No special-casing / skipping for any code; if there's no clear
-                // reason from the server, just call it an unknown error and retry.
-                scheduleReportRetry(reportData, attempt, description || 'unknown error');
+                // Capture the exact reason: the server's description if any, otherwise
+                // an unknown error tagged with the HTTP status code.
+                const reason = description || `unknown error (HTTP ${res.status})`;
+                scheduleReportRetry(reportData, attempt, reason, failures);
             },
-            onerror: () => scheduleReportRetry(reportData, attempt, 'network error'),
-            ontimeout: () => scheduleReportRetry(reportData, attempt, 'timeout')
+            onerror: () => scheduleReportRetry(reportData, attempt, 'network error / connection refused', failures),
+            ontimeout: () => scheduleReportRetry(reportData, attempt, `timeout (no reply in ${REPORT_TIMEOUT_MS}ms)`, failures)
         });
     }
 
-    function scheduleReportRetry(reportData, attempt, reason) {
+    function scheduleReportRetry(reportData, attempt, reason, failures) {
+        // Record exactly what went wrong on this attempt
+        failures.push({ attempt, reason });
+
         if (attempt >= MAX_REPORT_ATTEMPTS) {
-            // Give up silently after all attempts to avoid UI spam.
-            console.warn(`[REPORT] Gave up after ${MAX_REPORT_ATTEMPTS} attempts for ${reportData.code || 'report'}: ${reason}`);
+            // All dashboard attempts failed -> fall back to Telegram so it's not lost.
+            console.warn(`[REPORT] Dashboard failed after ${MAX_REPORT_ATTEMPTS} attempts for ${reportData.code || 'report'}: ${reason}. Falling back to Telegram...`);
+            reportToTelegram(reportData, failures);
             return;
         }
         // Exponential backoff (1s, 2s ...) + jitter so retries also stay staggered.
         const backoff = (1000 * Math.pow(2, attempt - 1)) + Math.random() * 1000;
         console.warn(`[REPORT] Attempt ${attempt}/${MAX_REPORT_ATTEMPTS} failed (${reason}). Retrying in ${Math.round(backoff)}ms...`);
-        setTimeout(() => sendReportAttempt(reportData, attempt + 1), backoff);
+        setTimeout(() => sendReportAttempt(reportData, attempt + 1, failures), backoff);
+    }
+
+    // ================================
+    // 🆘 TELEGRAM FALLBACK REPORTING
+    // ================================
+    // Last-resort delivery when the dashboard is unreachable/failing. Sends the
+    // claim status AND exactly why the backend report failed (timeout, queue
+    // full, network error, etc.) for every attempt, so nothing is lost or vague.
+    function reportToTelegram(reportData, failures) {
+        failures = Array.isArray(failures) ? failures : [];
+        const lastReason = failures.length ? failures[failures.length - 1].reason : 'unknown error';
+
+        const lines = [
+            `🆘 Telegram fallback - dashboard report FAILED`,
+            ``,
+            `— Why the backend failed —`,
+            `Last error: ${lastReason}`,
+            `Attempts: ${failures.length || MAX_REPORT_ATTEMPTS}`
+        ];
+        // Per-attempt breakdown so you can see what exactly happened each time
+        failures.forEach(f => lines.push(`  #${f.attempt}: ${f.reason}`));
+
+        lines.push(``);
+        lines.push(`— Claim —`);
+        lines.push(`User: ${reportData.username || 'UNKNOWN'}`);
+        lines.push(`Code: ${reportData.code || 'UNKNOWN'}`);
+        lines.push(`Status: ${reportData.status || 'UNKNOWN'}`);
+        if (reportData.status === 'SUCCESS') {
+            lines.push(`Amount: ${reportData.amount} ${reportData.currency}`);
+        } else {
+            if (reportData.reason) lines.push(`Reason: ${reportData.reason}`);
+            if (reportData.error) lines.push(`Error: ${reportData.error}`);
+        }
+        if (reportData.isRetry) lines.push(`(manual retry)`);
+        lines.push(`Time: ${reportData.timestamp || new Date().toISOString()}`);
+
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: `https://api.telegram.org/bot${TG_REPORT_BOT_TOKEN}/sendMessage`,
+            headers: {
+                "Content-Type": "application/json"
+            },
+            data: JSON.stringify({ chat_id: TG_REPORT_CHAT_ID, text: lines.join('\n') }),
+            timeout: 15000,
+            onload: (res) => {
+                let ok = false;
+                try {
+                    const parsed = JSON.parse(res.responseText);
+                    ok = parsed && parsed.ok === true;
+                } catch (e) {
+                    ok = false;
+                }
+                if (ok) {
+                    addLog(`Reported ${reportData.code || ''} to Telegram (dashboard down)`, "warning", true);
+                } else {
+                    addLog(`Telegram fallback failed for ${reportData.code || ''}`, "error", true);
+                }
+            },
+            onerror: () => addLog(`Telegram fallback failed for ${reportData.code || ''}`, "error", true),
+            ontimeout: () => addLog(`Telegram fallback failed for ${reportData.code || ''}`, "error", true)
+        });
     }
 
     // ================================
