@@ -1,10 +1,8 @@
 FROM ubuntu:22.04
-
 ENV DEBIAN_FRONTEND=noninteractive
-
 # 1. Install dependencies (Added curl, bzip2, and xz-utils for the manual Firefox Dev install)
-RUN sed -i 's/archive.ubuntu.com/us-east-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/us-east-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
+RUN sed -i 's/archive.ubuntu.com/eu-west-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.ubuntu.com/eu-west-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y \
     software-properties-common \
     gnupg \
@@ -52,7 +50,6 @@ RUN sed -i 's/archive.ubuntu.com/us-east-1.ec2.archive.ubuntu.com/g' /etc/apt/so
     lsb-release \
     unzip \
     && apt-get clean
-
 # --- NEW SECTION: Install Firefox Developer Edition ---
 # Using curl -f -L to handle redirects and fail on error, and tar -xf to auto-detect formats.
 # Pinned to Developer Edition 151.0b9 
@@ -61,17 +58,14 @@ RUN curl -f -L "https://archive.mozilla.org/pub/devedition/releases/151.0b9/linu
     && ln -s /opt/firefox/firefox /usr/bin/firefox \
     && rm /tmp/firefox-dev.tar.xz
 # ------------------------------------------------------
-
 # --- NEW SECTION: Install Geckodriver Manually ---
 RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O /tmp/geckodriver.tar.gz \
     && tar -xzf /tmp/geckodriver.tar.gz -C /usr/local/bin \
     && rm /tmp/geckodriver.tar.gz
 # ------------------------------------------------
-
 # --- Install Python Libraries ---
 RUN pip3 install selenium
 # --------------------------------
-
 # --- FIREFOX CONFIGURATION (FIX: Allow Unsigned Extensions) ---
 # For Developer Edition, these files live in /opt/firefox
 RUN mkdir -p /opt/firefox/browser/defaults/preferences/ && \
@@ -81,17 +75,12 @@ RUN mkdir -p /opt/firefox/browser/defaults/preferences/ && \
     echo 'lockPref("xpinstall.signatures.required", false);' >> /opt/firefox/mozilla.cfg && \
     echo 'lockPref("extensions.checkCompatibility.nightly", false);' >> /opt/firefox/mozilla.cfg
 # --------------------------------------------------------------
-
 # 2b. Set /tmp to be globally writable (Sticky Bit) 
 RUN chmod 1777 /tmp
-
 # 3. Enable the full noVNC interface
 RUN ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html
-
 WORKDIR /app
 COPY . .
-
 # Fix permissions for the startup script
 RUN chmod +x /app/run.sh
-
 CMD ["/app/run.sh"]
