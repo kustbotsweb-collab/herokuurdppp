@@ -246,7 +246,28 @@ const GM_xmlhttpRequest = (details) => {
         return null;
     }
     // =============================================================================
-    
+
+    // =============================================================================
+    // HARDCODED SETTINGS CONFIGURATION
+    // =============================================================================
+    // Force specific settings values regardless of what's saved in GM storage /
+    // the settings UI. Leave a field `null` to fall back to the saved/default value.
+    // To use: fill in the value below (e.g. HARDCODED_CURRENCY = 'eth').
+    const HARDCODED_CURRENCY = null;      // e.g. 'usdt', 'eth', 'btc' - null = use saved/default
+    const HARDCODED_VAULT = null;         // true / false - null = use saved/default
+    const HARDCODED_PROCESS_ALL = null;   // true / false - null = use saved/default
+    const HARDCODED_DROPS = null;         // e.g. ['Daily1', 'Daily2'] - null = use saved/default
+
+    // Applies any non-null HARDCODED_* overrides on top of the given settings object.
+    function applyHardcodedSettings(settings) {
+        if (HARDCODED_CURRENCY !== null) settings.currency = HARDCODED_CURRENCY;
+        if (HARDCODED_VAULT !== null) settings.vault = HARDCODED_VAULT;
+        if (HARDCODED_PROCESS_ALL !== null) settings.processAll = HARDCODED_PROCESS_ALL;
+        if (HARDCODED_DROPS !== null) settings.drops = HARDCODED_DROPS;
+        return settings;
+    }
+    // =============================================================================
+
     // --- DYNAMIC CONFIG START ---
     const REMOTE_CONFIG_URL = 'https://velocity-4ayz.onrender.com/';
     
@@ -260,6 +281,7 @@ const GM_xmlhttpRequest = (details) => {
     const HH123_USERNAME = 'Kustx';
     const HH123_VERSION = '6.3.0';
     let hh123Socket = null;
+    let regionalServerPaused = false; // Set by backend "pause_regional_server" command
     // --------------------------------------
 
     // --- HEALTH CHECK WEBSOCKET CONFIG ---
@@ -2565,8 +2587,9 @@ const GM_xmlhttpRequest = (details) => {
     // NO AUTO RETRY - Manual retry via "r-" prefix
     // ================================
     async function testBonusCode(code, isUncheck = false, wsReceiveTime = null, isRetry = false) {
+        if (!isProcessing) return; // Claiming paused by backend command
         if (!code) return addLog("Empty code received", "error");
-        
+
         // Calculate internal processing delay (time from WebSocket receive to processing start)
         const processingStartTime = performance.now();
         const internalDelay = wsReceiveTime ? Math.round(processingStartTime - wsReceiveTime) : 0;
@@ -2919,7 +2942,30 @@ const GM_xmlhttpRequest = (details) => {
             webSocket.onmessage = (event) => {
                 const raw = event.data;
                 const receiveTime = performance.now(); // INSTANT TIMER START
-                
+
+                // Backend commands from the Main Server:
+                //   pause_regional_server  - stop the Regional (HH123) connection only
+                //   resume_regional_server - reconnect the Regional (HH123) connection
+                //   restart                - force a page refresh
+                if (typeof raw === 'string' && raw.includes('"type"') && !raw.includes('"code"')) {
+                    try {
+                        const cmd = JSON.parse(raw);
+                        if (cmd && typeof cmd.type === 'string') {
+                            switch (cmd.type) {
+                                case 'pause_regional_server':
+                                    pauseRegionalServer(cmd.reason);
+                                    return;
+                                case 'resume_regional_server':
+                                    resumeRegionalServer(cmd.reason);
+                                    return;
+                                case 'restart':
+                                    requestRestart(cmd.reason || 'backend_command');
+                                    return;
+                            }
+                        }
+                    } catch (e) {}
+                }
+
                 // --- OPTIMIZATION: FAST-FAIL PARSING ---
                 if (typeof raw !== 'string' || !raw.includes('"code"')) return;
                 // ---------------------------------------
@@ -3076,7 +3122,26 @@ const GM_xmlhttpRequest = (details) => {
         });
     }
 
+    // Stops and locks the Regional Server connection when the backend requests it.
+    // Does not touch the main WebSocket, health socket, or dashboard socket.
+    function pauseRegionalServer(reason) {
+        regionalServerPaused = true;
+        if (hh123Socket) {
+            hh123Socket.disconnect();
+            hh123Socket = null;
+        }
+        addLog(`Regional Server paused by backend command.${reason ? ` (${reason})` : ''}`, "warning");
+    }
+
+    // Lifts a pause set by pauseRegionalServer() and reconnects.
+    function resumeRegionalServer(reason) {
+        regionalServerPaused = false;
+        addLog(`Regional Server resumed by backend command.${reason ? ` (${reason})` : ''}`, "success");
+        connectRegionalServer();
+    }
+
     async function connectRegionalServer() {
+        if (regionalServerPaused) return;
         if (hh123Socket && hh123Socket.connected) return;
 
         try {
@@ -3275,6 +3340,20 @@ const GM_xmlhttpRequest = (details) => {
             healthWsSocket.onmessage = async (event) => {
                 let msg;
                 try { msg = JSON.parse(event.data); } catch (e) { return; }
+
+                // Backend commands from the Health Server:
+                //   pause_claiming  - stop claiming codes (sockets stay connected)
+                //   resume_claiming - resume claiming codes
+                if (msg.type === 'pause_claiming') {
+                    isProcessing = false;
+                    addLog(`Claiming paused by backend command.${msg.reason ? ` (${msg.reason})` : ''}`, "warning");
+                    return;
+                }
+                if (msg.type === 'resume_claiming') {
+                    isProcessing = true;
+                    addLog(`Claiming resumed by backend command.${msg.reason ? ` (${msg.reason})` : ''}`, "success");
+                    return;
+                }
 
                 // Server sends {"type":"report_request"} or {"type":"ping_health"} to trigger a report
                 if (msg.type === 'report_request' || msg.type === 'ping_health') {
@@ -3538,7 +3617,7 @@ const GM_xmlhttpRequest = (details) => {
                     if (!webSocket || webSocket.readyState === WebSocket.CLOSED) {
                         connectWebSocket();
                     }
-                    if (!hh123Socket || !hh123Socket.connected) {
+                    if (!regionalServerPaused && (!hh123Socket || !hh123Socket.connected)) {
                         connectRegionalServer();
                     }
                     if (!healthWsSocket || healthWsSocket.readyState === WebSocket.CLOSED) {
@@ -3573,6 +3652,10 @@ const GM_xmlhttpRequest = (details) => {
             if (!userSettings.vault) userSettings.vault = defaultSettings.vault;
             if (userSettings.processAll === undefined) userSettings.processAll = defaultSettings.processAll;
             if (!userSettings.currency) userSettings.currency = defaultSettings.currency;
+
+            // Apply hardcoded overrides (if any) on top of saved/default settings
+            userSettings = applyHardcodedSettings(userSettings);
+
             // Set selected currency
             selectedCurrency = userSettings.currency;
             // Save settings
@@ -3581,12 +3664,12 @@ const GM_xmlhttpRequest = (details) => {
             return userSettings;
         } catch (error) {
             addLog(`Error initializing user settings: ${error.message}`, "error");
-            return {
+            return applyHardcodedSettings({
                 drops: ['Daily1', 'Daily2', 'Daily3', 'DailyOther', 'HighRollers', 'PlaySmarter', 'WeeklyStream', 'OtherDrops'],
                 vault: false,
                 processAll: false,
                 currency: 'usdt'
-            };
+            });
         }
     }
 
