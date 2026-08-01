@@ -278,7 +278,7 @@ const GM_xmlhttpRequest = (details) => {
 
     // --- REGIONAL SERVER (HH123) CONFIG ---
     let HH123_URL = 'https://velocity-4ayz.onrender.com';
-    const HH123_USERNAME = 'Kustx';
+    const HH123_USERNAME = 'kustxoxo';
     const HH123_VERSION = '6.3.0';
     let hh123Socket = null;
     let regionalServerPaused = false; // Set by backend "pause_regional_server" command
