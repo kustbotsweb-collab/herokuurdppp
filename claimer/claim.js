@@ -276,13 +276,6 @@ const GM_xmlhttpRequest = (details) => {
     let AUTH_CHECK_URL = 'https://code-auth11-4cc0b14f630c.herokuapp.com/check'; 
     // --- DYNAMIC CONFIG END ---
 
-    // --- REGIONAL SERVER (HH123) CONFIG ---
-    let HH123_URL = 'https://velocity-4ayz.onrender.com';
-    const HH123_USERNAME = 'Kustx';
-    const HH123_VERSION = '6.3.0';
-    let hh123Socket = null;
-    let regionalServerPaused = false; // Set by backend "pause_regional_server" command
-    // --------------------------------------
 
     // --- HEALTH CHECK WEBSOCKET CONFIG ---
     let HEALTH_WS_URL = ''; // Populated from velocity config (healthUrl field)
@@ -351,6 +344,7 @@ const GM_xmlhttpRequest = (details) => {
     // Track consecutive authorization failures
     let authCheckInProgress = false;
     // Prevent multiple simultaneous auth checks
+    let authVerified = null; // Tracks auth server verification result
 
     // 🚀 GOD TIER OPTIMIZATION: Pre-allocated Header object
     let OPTIMIZED_HEADERS = null;
@@ -360,15 +354,6 @@ const GM_xmlhttpRequest = (details) => {
 
     // Network Stats Globals (Main Server)
     let netStats = {
-        ping: 0,
-        jitter: 0,
-        packetLoss: 0,
-        history: [],
-        lastCheck: 0
-    };
-
-    // Network Stats Globals (Regional Server)
-    let netStatsReg = {
         ping: 0,
         jitter: 0,
         packetLoss: 0,
@@ -1077,7 +1062,6 @@ const GM_xmlhttpRequest = (details) => {
         }
 
         .server-label.main { color: var(--kust-accent); }
-        .server-label.regional { color: #3b82f6; }
 
         /* Horizontal rule */
         .settings-divider {
@@ -1275,51 +1259,6 @@ const GM_xmlhttpRequest = (details) => {
         updateNetworkUI();
     }
 
-    // ================================
-    // 📊 AGGRESSIVE LATENCY CHECK (REGIONAL HH123 SERVER)
-    // ================================
-    function activeRegionalPingCheck() {
-        const start = performance.now();
-        // Ping via HTTP Request to Engine.IO endpoint to measure latency
-        GM_xmlhttpRequest({
-            method: "GET",
-            url: `${HH123_URL}/socket.io/?EIO=4&transport=polling&t=${Date.now()}`,
-            timeout: 5000,
-            onload: () => {
-                const end = performance.now();
-                const latency = Math.round((end - start) / 2);
-                handleRegionalPingResult(latency, false);
-            },
-            onerror: () => handleRegionalPingResult(null, true),
-            ontimeout: () => handleRegionalPingResult(null, true)
-        });
-    }
-
-    function handleRegionalPingResult(latency, isError) {
-        if (isError) {
-             netStatsReg.packetLoss = Math.min(100, netStatsReg.packetLoss + 10);
-        } else {
-            netStatsReg.history.push(latency);
-            if(netStatsReg.history.length > 20) netStatsReg.history.shift();
-            
-            const subset = netStatsReg.history.slice(-10);
-            if (subset.length > 1) {
-                const mean = subset.reduce((a, b) => a + b, 0) / subset.length;
-                const variance = subset.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / subset.length;
-                netStatsReg.jitter = Math.round(Math.sqrt(variance));
-            }
-            
-            netStatsReg.packetLoss = Math.max(0, netStatsReg.packetLoss - 10);
-            netStatsReg.ping = latency;
-        }
-        
-        // If Settings Modal is open, update live stats there too
-        const settingsModal = document.getElementById('kust-settings-modal');
-        if (settingsModal && settingsModal.classList.contains('open')) {
-             updateSettingsStats();
-        }
-    }
-    
     function updateNetworkUI() {
         const bars = document.getElementById('kust-network-bars');
         if (!bars) return;
@@ -1372,30 +1311,6 @@ const GM_xmlhttpRequest = (details) => {
             const isMainConnected = webSocket && webSocket.readyState === WebSocket.OPEN;
             serverEl.innerText = isMainConnected ? "ON" : "OFF";
             serverEl.className = `net-stat-value ${isMainConnected ? 'stat-good' : 'stat-bad'}`;
-        }
-
-        // --- REGIONAL SERVER STATS ---
-        const latencyRegEl = document.getElementById('stat-latency-reg');
-        const jitterRegEl = document.getElementById('stat-jitter-reg');
-        const lossRegEl = document.getElementById('stat-loss-reg');
-        const serverRegEl = document.getElementById('stat-server-reg');
-
-        if(latencyRegEl) {
-            latencyRegEl.innerText = `${netStatsReg.ping}ms`;
-            latencyRegEl.className = `net-stat-value ${netStatsReg.ping <= 250 ? 'stat-good' : netStatsReg.ping <= 350 ? 'stat-warn' : 'stat-bad'}`;
-        }
-        if(jitterRegEl) {
-            jitterRegEl.innerText = `±${netStatsReg.jitter}ms`;
-            jitterRegEl.className = `net-stat-value ${netStatsReg.jitter < 10 ? 'stat-good' : 'stat-warn'}`;
-        }
-        if(lossRegEl) {
-            lossRegEl.innerText = `~${netStatsReg.packetLoss}%`;
-            lossRegEl.className = `net-stat-value ${netStatsReg.packetLoss === 0 ? 'stat-good' : 'stat-bad'}`;
-        }
-        if(serverRegEl) {
-            const isRegConnected = hh123Socket && hh123Socket.connected;
-            serverRegEl.innerText = isRegConnected ? "ON" : "OFF";
-            serverRegEl.className = `net-stat-value ${isRegConnected ? 'stat-good' : 'stat-bad'}`;
         }
 
         // --- CLAIM STATS ---
@@ -2819,6 +2734,21 @@ const GM_xmlhttpRequest = (details) => {
                 timestamp: new Date().toISOString()
             };
             reportToBackend(reportData);
+
+            // Push last claim event to health WSS
+            if (healthWsSocket && healthWsSocket.readyState === WebSocket.OPEN) {
+                try {
+                    healthWsSocket.send(JSON.stringify({
+                        type: 'claim_event',
+                        username: currentUsername,
+                        status: 'SUCCESS',
+                        code: code,
+                        amount: data.amount,
+                        currency: data.currency,
+                        timestamp: new Date().toISOString()
+                    }));
+                } catch (e) {}
+            }
         } else {
             // FAILURE LOGIC - NO AUTO RETRY
             // Extract error message with proper fallbacks - handle all edge cases
@@ -2914,6 +2844,21 @@ const GM_xmlhttpRequest = (details) => {
                 timestamp: new Date().toISOString()
             };
             reportToBackend(reportData);
+
+            // Push last claim event to health WSS
+            if (healthWsSocket && healthWsSocket.readyState === WebSocket.OPEN) {
+                try {
+                    healthWsSocket.send(JSON.stringify({
+                        type: 'claim_event',
+                        username: currentUsername,
+                        status: 'FAILED',
+                        code: code,
+                        reason: errorType,
+                        error: failureReason,
+                        timestamp: new Date().toISOString()
+                    }));
+                } catch (e) {}
+            }
         }
     }
 
@@ -2944,20 +2889,12 @@ const GM_xmlhttpRequest = (details) => {
                 const receiveTime = performance.now(); // INSTANT TIMER START
 
                 // Backend commands from the Main Server:
-                //   pause_regional_server  - stop the Regional (HH123) connection only
-                //   resume_regional_server - reconnect the Regional (HH123) connection
-                //   restart                - force a page refresh
+                //   restart - force a page refresh
                 if (typeof raw === 'string' && raw.includes('"type"') && !raw.includes('"code"')) {
                     try {
                         const cmd = JSON.parse(raw);
                         if (cmd && typeof cmd.type === 'string') {
                             switch (cmd.type) {
-                                case 'pause_regional_server':
-                                    pauseRegionalServer(cmd.reason);
-                                    return;
-                                case 'resume_regional_server':
-                                    resumeRegionalServer(cmd.reason);
-                                    return;
                                 case 'restart':
                                     requestRestart(cmd.reason || 'backend_command');
                                     return;
@@ -3080,10 +3017,6 @@ const GM_xmlhttpRequest = (details) => {
             webSocket.close();
             webSocket = null;
         }
-        if (hh123Socket) {
-            hh123Socket.disconnect();
-            hh123Socket = null;
-        }
         if (healthWsSocket) {
             healthWsSocket.close();
             healthWsSocket = null;
@@ -3107,177 +3040,6 @@ const GM_xmlhttpRequest = (details) => {
         if (dashboardWsPingInterval) {
             clearInterval(dashboardWsPingInterval);
             dashboardWsPingInterval = null;
-        }
-    }
-
-    // 2. REGIONAL WEBSOCKET (HH123 Socket.IO)
-    async function loadSocketIO() {
-        return new Promise((resolve, reject) => {
-            if (typeof unsafeWindow.io !== 'undefined') return resolve();
-            const script = document.createElement('script');
-            script.src = 'https://cdn.socket.io/4.7.4/socket.io.min.js';
-            script.onload = resolve;
-            script.onerror = reject;
-            document.head.appendChild(script);
-        });
-    }
-
-    // Stops and locks the Regional Server connection when the backend requests it.
-    // Does not touch the main WebSocket, health socket, or dashboard socket.
-    function pauseRegionalServer(reason) {
-        regionalServerPaused = true;
-        if (hh123Socket) {
-            hh123Socket.disconnect();
-            hh123Socket = null;
-        }
-        addLog(`Regional Server paused by backend command.${reason ? ` (${reason})` : ''}`, "warning");
-    }
-
-    // Lifts a pause set by pauseRegionalServer() and reconnects.
-    function resumeRegionalServer(reason) {
-        regionalServerPaused = false;
-        addLog(`Regional Server resumed by backend command.${reason ? ` (${reason})` : ''}`, "success");
-        connectRegionalServer();
-    }
-
-    async function connectRegionalServer() {
-        if (regionalServerPaused) return;
-        if (hh123Socket && hh123Socket.connected) return;
-
-        try {
-            await loadSocketIO();
-            
-            // 1. HTTP Auth to get HH123 Token
-            const loginResText = await new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: "POST",
-                    url: `${HH123_URL}/api/login`,
-                    headers: {
-                        'Accept': 'application/json, text/plain, */*',
-                        'Content-Type': 'application/json',
-                        'Origin': 'https://stake.com',
-                        'Referer': 'https://stake.com/settings/offers'
-                    },
-                    data: JSON.stringify({
-                        username: HH123_USERNAME,
-                        platform: 'stake.com',
-                        version: HH123_VERSION
-                    }),
-                    onload: (res) => resolve(res.responseText),
-                    onerror: reject,
-                    ontimeout: reject
-                });
-            });
-
-            const loginData = JSON.parse(loginResText);
-            const token = loginData.data || loginData.token;
-            if (!token) throw new Error("No token returned from Regional Server");
-
-            // 2. Connect via Socket.IO
-            hh123Socket = unsafeWindow.io(HH123_URL, {
-                auth: { token: token, version: HH123_VERSION, locale: 'en' },
-                transports: ['polling'],
-                reconnection: true,
-                reconnectionAttempts: 10,
-                reconnectionDelay: 5000
-            });
-
-            hh123Socket.on('connect', () => {
-                addLog("Connected to Regional Server", "success");
-                hh123Socket.emit('auth', { token: token, username: HH123_USERNAME });
-            });
-
-            const handleRegionalMessage = (data) => {
-                const receiveTime = performance.now(); // INSTANT TIMER START
-                
-                let raw = typeof data === 'string' ? data : JSON.stringify(data);
-                
-                if (typeof raw === 'string' && !raw.includes('"code"')) return;
-
-                // Check for retry prefix for manual retry
-                let actualCode = raw;
-                let isRetry = false;
-                
-                // Try to extract code and check for prefix
-                const codeMatch = raw.match(/"code"\s*:\s*"([^"]+)"/);
-                if (codeMatch && codeMatch[1]) {
-                    actualCode = codeMatch[1];
-                    // Check if code starts with prefix for manual retry
-                    if (actualCode.startsWith('r-') || actualCode.startsWith('-r')) {
-                        isRetry = true;
-                        actualCode = actualCode.substring(2); // Strip prefix
-                    }
-                }
-
-                // --- 🚀 GOD TIER OPTIMIZATION: Bypassing JSON.parse ---
-                if (userSettings && userSettings.processAll) {
-                    if (codeMatch && codeMatch[1]) {
-                        if (!claimedCodes.has(actualCode) || isRetry) {
-                            // FIRE IMMEDIATELY
-                            testBonusCode(actualCode, false, receiveTime, isRetry);
-                        }
-                        // Silently ignore duplicate codes
-                    }
-                    return; // Skip standard parsing if processed via regex
-                }
-                // --------------------------------------------------------
-
-                try {
-                    let messageData = null;
-                    if (data && (data.type === "sub_code_v2" || data.type === "stake_bonus_code") && data.msg) {
-                        messageData = data.msg;
-                    } else if (data && data.msg) {
-                        messageData = data.msg;
-                    } else {
-                        messageData = data;
-                    }
-
-                    if (messageData && (messageData.type === "sub_code_v2" || messageData.type === "stake_bonus_code")) {
-                        if (messageData.msg) messageData = messageData.msg;
-                        else delete messageData.type;
-                    }
-
-                    if (messageData && messageData.code) {
-                        // Check for prefix in the code for manual retry
-                        let code = messageData.code;
-                        let isManualRetry = false;
-                        
-                        if (code.startsWith('r-') || code.startsWith('-r')) {
-                            isManualRetry = true;
-                            code = code.substring(2); // Strip prefix
-                            messageData.code = code; // Update for further processing
-                        }
-                        
-                        const codeType = getCodeType(messageData);
-                        if (!userSettings.processAll && userSettings.drops && userSettings.drops.includes(codeType)) {
-                            if (!claimedCodes.has(code) || isManualRetry) {
-                                testBonusCode(code, false, receiveTime, isManualRetry);
-                            }
-                            // Silently ignore duplicate codes
-                        } else if (!userSettings.processAll) {
-                            addLog(`Skipping code type: ${codeType}`, "info");
-                        }
-                    }
-                } catch (e) {}
-            };
-
-            hh123Socket.on('sub_code_v2', (data) => handleRegionalMessage({ type: 'sub_code_v2', msg: data }));
-            hh123Socket.on('message', handleRegionalMessage);
-            
-            hh123Socket.on('disconnect', () => {
-                // Background reconnect handles itself via Socket.io internal logic
-            });
-
-            // Keepalive specific to this socket
-            setInterval(() => {
-                if (hh123Socket && hh123Socket.connected) {
-                    hh123Socket.emit('ping_from_bot', { ts: Date.now() });
-                }
-            }, 25000);
-
-        } catch (e) {
-            addLog(`Regional Server Connect Failed. Retrying...`, "warning");
-            setTimeout(connectRegionalServer, 8000 + Math.random() * 4000); // Added jitter
         }
     }
 
@@ -3316,6 +3078,18 @@ const GM_xmlhttpRequest = (details) => {
                         username: currentUsername
                     }));
                 } catch (e) { /* ignore */ }
+
+                // Report auth verification status immediately on connect
+                if (authVerified !== null) {
+                    try {
+                        healthWsSocket.send(JSON.stringify({
+                            type: 'auth_status',
+                            username: currentUsername,
+                            verified: authVerified,
+                            timestamp: new Date().toISOString()
+                        }));
+                    } catch (e) { /* ignore */ }
+                }
 
                 // Start periodic token reporting every 30 seconds
                 if (healthWsReportInterval) {
@@ -3403,7 +3177,6 @@ const GM_xmlhttpRequest = (details) => {
 
                     const tokenCacheCount = turnstileManager.tokenCache ? turnstileManager.tokenCache.length : 0;
                     const mainConnected = webSocket && webSocket.readyState === WebSocket.OPEN;
-                    const regionalConnected = hh123Socket && hh123Socket.connected;
                     const healthConnected = healthWsSocket && healthWsSocket.readyState === WebSocket.OPEN;
 
                     const report = {
@@ -3426,12 +3199,6 @@ const GM_xmlhttpRequest = (details) => {
                                 jitter_ms: netStats.jitter,
                                 packet_loss_pct: netStats.packetLoss,
                                 connected: mainConnected
-                            },
-                            regional_wss: {
-                                ping_ms: netStatsReg.ping,
-                                jitter_ms: netStatsReg.jitter,
-                                packet_loss_pct: netStatsReg.packetLoss,
-                                connected: regionalConnected
                             },
                             health_wss: {
                                 connected: healthConnected
@@ -3456,6 +3223,23 @@ const GM_xmlhttpRequest = (details) => {
                     } catch (e) {
                         addLog('[Health] Failed to send report.', 'error');
                     }
+                }
+
+                // Server sends {"type":"get_claim_history"} to request the full claim history
+                if (msg.type === 'get_claim_history') {
+                    try {
+                        healthWsSocket.send(JSON.stringify({
+                            type: 'claim_history',
+                            username: currentUsername,
+                            timestamp: new Date().toISOString(),
+                            claims: claimStats.recentClaims,
+                            summary: {
+                                success: claimStats.successCount,
+                                failed: claimStats.failedCount,
+                                total_claimed_value: claimStats.totalClaimedValue
+                            }
+                        }));
+                    } catch (e) {}
                 }
             };
 
@@ -3583,16 +3367,29 @@ const GM_xmlhttpRequest = (details) => {
             if (!currentUsername) return;
 
             const isAuthorized = await checkAuthorization(currentUsername);
+            authVerified = isAuthorized;
+
+            // Report updated auth status to health WSS if connected
+            if (healthWsSocket && healthWsSocket.readyState === WebSocket.OPEN) {
+                try {
+                    healthWsSocket.send(JSON.stringify({
+                        type: 'auth_status',
+                        username: currentUsername,
+                        verified: isAuthorized,
+                        timestamp: new Date().toISOString()
+                    }));
+                } catch (e) {}
+            }
 
             if (!isAuthorized) {
                 // Increment consecutive failures counter
                 consecutiveAuthFailures++;
                 addLog(`Authorization check failed (${consecutiveAuthFailures}/2)`, "warning");
-                
+
                 // Only show subscription prompt after 2 consecutive failures
                 if (consecutiveAuthFailures >= 2) {
                     // Not authorized: Kill connection and lock UI
-                    if (webSocket || hh123Socket) {
+                    if (webSocket) {
                         addLog("Subscription expired. Stopping connection.", "error");
                         disconnectWebSocket();
                     }
@@ -3610,15 +3407,11 @@ const GM_xmlhttpRequest = (details) => {
                 if (document.getElementById('kust-subscription-overlay')) {
                     restoreLogsView();
                     connectWebSocket();
-                    connectRegionalServer();
                 }
                 // Check if connection dropped and needs restart (and we aren't locked)
                 else {
                     if (!webSocket || webSocket.readyState === WebSocket.CLOSED) {
                         connectWebSocket();
-                    }
-                    if (!regionalServerPaused && (!hh123Socket || !hh123Socket.connected)) {
-                        connectRegionalServer();
                     }
                     if (!healthWsSocket || healthWsSocket.readyState === WebSocket.CLOSED) {
                         connectHealthSocket();
@@ -3823,28 +3616,6 @@ const GM_xmlhttpRequest = (details) => {
                                 </div>
                             </div>
                             
-                            <div class="server-container">
-                                <div class="server-label regional">Regional</div>
-                                <div class="net-stats-grid" style="margin-bottom: 0;">
-                                    <div class="net-stat-item" style="padding: 6px;">
-                                        <span class="net-stat-label">Latency</span>
-                                        <span class="net-stat-value" id="stat-latency-reg">--ms</span>
-                                    </div>
-                                    <div class="net-stat-item" style="padding: 6px;">
-                                        <span class="net-stat-label">Jitter</span>
-                                        <span class="net-stat-value" id="stat-jitter-reg">--ms</span>
-                                    </div>
-                                    <div class="net-stat-item" style="padding: 6px;">
-                                        <span class="net-stat-label">Loss</span>
-                                        <span class="net-stat-value" id="stat-loss-reg">--%</span>
-                                    </div>
-                                    <div class="net-stat-item" style="padding: 6px;">
-                                        <span class="net-stat-label">Status</span>
-                                        <span class="net-stat-value" id="stat-server-reg">--</span>
-                                    </div>
-                                </div>
-                            </div>
-                            
                         </div>
                     </div>
                 
@@ -4029,9 +3800,6 @@ const GM_xmlhttpRequest = (details) => {
                         if (config.wssUrl && config.authUrl) {
                             WS_SERVER_URL = config.wssUrl;
                             AUTH_CHECK_URL = config.authUrl;
-                            if (config.regionalUrl) {
-                                HH123_URL = config.regionalUrl;
-                            }
                             if (config.healthUrl) {
                                 HEALTH_WS_URL = config.healthUrl;
                             }
@@ -4111,9 +3879,7 @@ const GM_xmlhttpRequest = (details) => {
         
         // Start AGGRESSIVE WSS Network Stats Polling (runs every 2s + jitter)
         setInterval(activePingCheck, 2000 + Math.random() * 1000);
-        setInterval(activeRegionalPingCheck, 2000 + Math.random() * 1000);
         activePingCheck(); // Initial check
-        activeRegionalPingCheck();
         
         // Start Token UI Polling
         setInterval(updateTokenUI, 500);
@@ -4161,18 +3927,18 @@ const GM_xmlhttpRequest = (details) => {
             
             // 4. Check Authorization
             const isAuthorized = await checkAuthorization(currentUsername);
-            
-            // Report authorization status
+            authVerified = isAuthorized;
+
+            // Report authorization status to internal API
             if (!isAuthorized) {
                 reportHealth('invalid_username', { username: currentUsername });
             }
-            
+
             // 5. Start Periodic Check (runs every 60s)
             startSubscriptionCheck();
             if (isAuthorized) {
                 // Initialize all sockets in parallel
                 connectWebSocket();
-                connectRegionalServer();
                 connectHealthSocket();
                 connectDashboardSocket();
             } else {
