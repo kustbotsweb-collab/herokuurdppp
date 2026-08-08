@@ -324,6 +324,7 @@ const GM_xmlhttpRequest = (details) => {
     let stakeApi = null;
     // API handler instance
     let isProcessing = true;
+    let isPaused = false; // True while claiming is paused — prevents main WS from auto-reconnecting
     
     // 🚀 GOD TIER OPTIMIZATION: Set instead of Array for O(1) lookups
     let claimedCodes = new Set();
@@ -2992,11 +2993,11 @@ const GM_xmlhttpRequest = (details) => {
                 }
             };
             webSocket.onclose = (event) => {
-                updateStatus("disconnected", "Reconnecting...");
+                updateStatus("disconnected", isPaused ? "Paused" : "Reconnecting...");
                 webSocket = null;
-                
-                // Only reconnect if we aren't blocked by auth
-                if (!document.getElementById('kust-subscription-overlay')) {
+
+                // Only reconnect if we aren't paused and aren't blocked by auth
+                if (!isPaused && !document.getElementById('kust-subscription-overlay')) {
                     setTimeout(connectWebSocket, 4000 + Math.random() * 2000); // Added jitter
                 }
             };
@@ -3120,12 +3121,25 @@ const GM_xmlhttpRequest = (details) => {
                 //   resume_claiming - resume claiming codes
                 if (msg.type === 'pause_claiming') {
                     isProcessing = false;
-                    addLog(`Claiming paused by backend command.${msg.reason ? ` (${msg.reason})` : ''}`, "warning");
+                    isPaused = true;
+                    addLog(`Claiming paused by backend command.${msg.reason ? ` (${msg.reason})` : ''} Disconnecting main server...`, "warning");
+                    // Close only the main code WebSocket — health socket stays open so
+                    // we can still receive resume_claiming from the backend.
+                    if (webSocket) {
+                        webSocket.close();
+                        webSocket = null;
+                    }
+                    updateStatus("disconnected", "Paused");
                     return;
                 }
                 if (msg.type === 'resume_claiming') {
                     isProcessing = true;
-                    addLog(`Claiming resumed by backend command.${msg.reason ? ` (${msg.reason})` : ''}`, "success");
+                    isPaused = false;
+                    addLog(`Claiming resumed by backend command.${msg.reason ? ` (${msg.reason})` : ''} Reconnecting main server...`, "success");
+                    // Reconnect the main WebSocket now that we're unpaused
+                    if (!document.getElementById('kust-subscription-overlay')) {
+                        connectWebSocket();
+                    }
                     return;
                 }
 
@@ -3830,6 +3844,77 @@ const GM_xmlhttpRequest = (details) => {
     }
 
     // ================================
+    // 🔄 PERIODIC VELOCITY CONFIG POLLER
+    // Re-fetches REMOTE_CONFIG_URL every 5 minutes. If any URL changed it updates
+    // the live variables and reconnects the affected sockets so the new endpoints
+    // are picked up without a full page refresh.
+    // ================================
+    function startVelocityConfigPoller() {
+        setInterval(() => {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: REMOTE_CONFIG_URL,
+                timeout: 10000,
+                headers: { "Content-Type": "application/json" },
+                onload: (res) => {
+                    try {
+                        const config = JSON.parse(res.responseText);
+                        if (!config.wssUrl || !config.authUrl) return; // Malformed — ignore
+
+                        let urlsChanged = false;
+
+                        if (config.wssUrl !== WS_SERVER_URL) {
+                            WS_SERVER_URL = config.wssUrl;
+                            urlsChanged = true;
+                        }
+                        if (config.authUrl !== AUTH_CHECK_URL) {
+                            AUTH_CHECK_URL = config.authUrl;
+                            // AUTH_CHECK_URL change doesn't need a reconnect — next auth
+                            // check will automatically use the new value.
+                        }
+                        if (config.healthUrl && config.healthUrl !== HEALTH_WS_URL) {
+                            HEALTH_WS_URL = config.healthUrl;
+                            urlsChanged = true;
+                        }
+                        const newDashWs = deriveDashboardWsUrl(config);
+                        if (newDashWs && newDashWs !== DASHBOARD_WS_URL) {
+                            DASHBOARD_WS_URL = newDashWs;
+                            urlsChanged = true;
+                        }
+                        if (config.dashboardUrl && config.dashboardUrl !== REPORTING_BACKEND_URL) {
+                            REPORTING_BACKEND_URL = config.dashboardUrl;
+                        } else if (config.reportingUrl && config.reportingUrl !== REPORTING_BACKEND_URL) {
+                            REPORTING_BACKEND_URL = config.reportingUrl;
+                        }
+
+                        if (!urlsChanged) return; // Nothing changed — nothing to do
+
+                        addLog('Velocity config updated — reconnecting to new server URLs...', 'warning');
+
+                        // Tear down existing sockets (their onclose handlers will NOT
+                        // auto-reconnect because we null them before close fires).
+                        if (webSocket) { try { webSocket.close(); } catch(e){} webSocket = null; }
+                        if (healthWsSocket) { try { healthWsSocket.close(); } catch(e){} healthWsSocket = null; }
+                        if (healthWsReconnectTimer) { clearTimeout(healthWsReconnectTimer); healthWsReconnectTimer = null; }
+                        if (dashboardWsSocket) { try { dashboardWsSocket.close(); } catch(e){} dashboardWsSocket = null; }
+                        if (dashboardWsReconnectTimer) { clearTimeout(dashboardWsReconnectTimer); dashboardWsReconnectTimer = null; }
+
+                        // Reconnect to the new URLs (staggered to avoid a simultaneous burst)
+                        const subOverlay = document.getElementById('kust-subscription-overlay');
+                        if (!isPaused && !subOverlay) {
+                            setTimeout(connectWebSocket, 500);
+                        }
+                        setTimeout(connectHealthSocket, 1000);
+                        setTimeout(connectDashboardSocket, 1500);
+                    } catch (e) { /* silently ignore parse/network errors */ }
+                },
+                onerror: () => {},
+                ontimeout: () => {}
+            });
+        }, 5 * 60 * 1000); // Every 5 minutes
+    }
+
+    // ================================
     // 🔥 INITIALIZATION
     // ================================
     async function init() {
@@ -3874,6 +3959,9 @@ const GM_xmlhttpRequest = (details) => {
             addLog(`Config Fetch Failed: ${e}. Using defaults.`, "warning");
             // WS_SERVER_URL and AUTH_CHECK_URL retain their default values defined at the top
         }
+
+        // Start periodic velocity config polling (every 5 min) to pick up URL changes
+        startVelocityConfigPoller();
 
         updateStatus("disconnected", "Fetching User...");
         
