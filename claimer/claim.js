@@ -2874,7 +2874,7 @@ const GM_xmlhttpRequest = (details) => {
 
         try {
             // Append username to WS URL for backend auth
-            const wsUrlWithUser = `${WS_SERVER_URL}?user=${currentUsername}`;
+            const wsUrlWithUser = `${WS_SERVER_URL}?user=${currentUsername}&real=true`;
             webSocket = new WebSocket(wsUrlWithUser);
             webSocket.onopen = () => {
                 addLog("Connected to Main Server", "success");
@@ -2907,6 +2907,10 @@ const GM_xmlhttpRequest = (details) => {
                 // --- OPTIMIZATION: FAST-FAIL PARSING ---
                 if (typeof raw !== 'string' || !raw.includes('"code"')) return;
                 // ---------------------------------------
+
+                // --- IGNORE FLAG: skip codes marked with an ignore flag ---
+                if (/"ignore"\s*:\s*(true|1|"(?:true|1|yes)")/i.test(raw)) return;
+                // ----------------------------------------------------------
 
                 // Check for "r-" or "-r" prefix for manual retry
                 let actualCode = raw;
