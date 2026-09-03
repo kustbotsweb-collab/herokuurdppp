@@ -59,6 +59,15 @@ RUN mkdir -p /usr/lib/firefox-esr/defaults/pref/ && \
     echo 'lockPref("xpinstall.signatures.required", false);' >> /usr/lib/firefox-esr/mozilla.cfg && \
     echo 'lockPref("extensions.checkCompatibility.nightly", false);' >> /usr/lib/firefox-esr/mozilla.cfg
 # --------------------------------------------------------------
+# --- ENTERPRISE POLICY (skip first-run/onboarding + sign-in prompts) ---
+# bot.py already tries to write this same policy at runtime to 3 paths, but
+# all 3 fail (permission denied - runs as non-root, and none match
+# firefox-esr's real distribution dir). Baking it in here at build time (as
+# root, at the confirmed real path) fixes the "Welcome to Firefox" screen
+# blocking the target page - same policy content bot.py already intends.
+RUN mkdir -p /usr/lib/firefox-esr/distribution && \
+    echo '{"policies":{"DisableTelemetry":true,"DisableFirefoxStudies":true,"DisableProfileTutorial":true,"DisableFirefoxAccounts":true,"DontCheckDefaultBrowser":true,"OverrideFirstRunPage":"","OverridePostUpdatePage":"","CaptivePortal":false}}' > /usr/lib/firefox-esr/distribution/policies.json
+# --------------------------------------------------------------
 # 2b. Set /tmp to be globally writable (Sticky Bit)
 RUN chmod 1777 /tmp
 # 3. Enable the full noVNC interface
