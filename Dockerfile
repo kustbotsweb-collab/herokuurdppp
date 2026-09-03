@@ -1,6 +1,6 @@
 FROM debian:13
 ENV DEBIAN_FRONTEND=noninteractive
-# 1. Install dependencies
+# 1. Install dependencies (Added curl, bzip2, and xz-utils for the manual Firefox Dev install)
 RUN apt-get update && apt-get install -y \
     gnupg \
     wget \
@@ -16,7 +16,6 @@ RUN apt-get update && apt-get install -y \
     supervisor \
     python3 \
     python3-pip \
-    firefox-esr \
     fonts-liberation \
     libasound2 \
     libatk1.0-0 \
@@ -48,25 +47,30 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     unzip \
     && apt-get clean
-# --------------------------------------------------------------
+# --- NEW SECTION: Install Firefox Developer Edition ---
+# Using curl -f -L to handle redirects and fail on error, and tar -xf to auto-detect formats.
+# Pinned to Developer Edition 151.0b9
+RUN curl -f -L "https://archive.mozilla.org/pub/devedition/releases/151.0b9/linux-x86_64/en-US/firefox-151.0b9.tar.xz" -o /tmp/firefox-dev.tar.xz \
+    && tar -xf /tmp/firefox-dev.tar.xz -C /opt \
+    && ln -s /opt/firefox/firefox /usr/bin/firefox \
+    && rm /tmp/firefox-dev.tar.xz
+# ------------------------------------------------------
+# --- NEW SECTION: Install Geckodriver Manually ---
+RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/geckodriver-v0.34.0-linux64.tar.gz" -O /tmp/geckodriver.tar.gz \
+    && tar -xzf /tmp/geckodriver.tar.gz -C /usr/local/bin \
+    && rm /tmp/geckodriver.tar.gz
+# ------------------------------------------------
+# --- Install Python Libraries ---
+RUN pip3 install --break-system-packages selenium
+# --------------------------------
 # --- FIREFOX CONFIGURATION (FIX: Allow Unsigned Extensions) ---
-# Debian's firefox-esr installs to /usr/lib/firefox-esr - confirmed live on
-# an actual arm64 instance (readlink -f `which firefox-esr`).
-RUN mkdir -p /usr/lib/firefox-esr/defaults/pref/ && \
-    echo 'pref("general.config.filename", "mozilla.cfg");' > /usr/lib/firefox-esr/defaults/pref/autoconfig.js && \
-    echo 'pref("general.config.obscure_value", 0);' >> /usr/lib/firefox-esr/defaults/pref/autoconfig.js && \
-    echo '//' > /usr/lib/firefox-esr/mozilla.cfg && \
-    echo 'lockPref("xpinstall.signatures.required", false);' >> /usr/lib/firefox-esr/mozilla.cfg && \
-    echo 'lockPref("extensions.checkCompatibility.nightly", false);' >> /usr/lib/firefox-esr/mozilla.cfg
-# --------------------------------------------------------------
-# --- ENTERPRISE POLICY (skip first-run/onboarding + sign-in prompts) ---
-# bot.py already tries to write this same policy at runtime to 3 paths, but
-# all 3 fail (permission denied - runs as non-root, and none match
-# firefox-esr's real distribution dir). Baking it in here at build time (as
-# root, at the confirmed real path) fixes the "Welcome to Firefox" screen
-# blocking the target page - same policy content bot.py already intends.
-RUN mkdir -p /usr/lib/firefox-esr/distribution && \
-    echo '{"policies":{"DisableTelemetry":true,"DisableFirefoxStudies":true,"DisableProfileTutorial":true,"DisableFirefoxAccounts":true,"DontCheckDefaultBrowser":true,"OverrideFirstRunPage":"","OverridePostUpdatePage":"","CaptivePortal":false}}' > /usr/lib/firefox-esr/distribution/policies.json
+# For Developer Edition, these files live in /opt/firefox
+RUN mkdir -p /opt/firefox/browser/defaults/preferences/ && \
+    echo 'pref("general.config.filename", "mozilla.cfg");' > /opt/firefox/browser/defaults/preferences/autoconfig.js && \
+    echo 'pref("general.config.obscure_value", 0);' >> /opt/firefox/browser/defaults/preferences/autoconfig.js && \
+    echo '//' > /opt/firefox/mozilla.cfg && \
+    echo 'lockPref("xpinstall.signatures.required", false);' >> /opt/firefox/mozilla.cfg && \
+    echo 'lockPref("extensions.checkCompatibility.nightly", false);' >> /opt/firefox/mozilla.cfg
 # --------------------------------------------------------------
 # 2b. Set /tmp to be globally writable (Sticky Bit)
 RUN chmod 1777 /tmp
