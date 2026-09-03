@@ -272,7 +272,12 @@ const GM_xmlhttpRequest = (details) => {
     const REMOTE_CONFIG_URL = 'https://velocity-4ayz.onrender.com/';
     
     // Default fallbacks (Old hardcoded values) in case remote fetch fails
-    let WS_SERVER_URL = 'wss://code-extract1-840a32439225.herokuapp.com/ws';
+    // MAIN SERVER: hardcoded directly to our own relay - no longer sourced from
+    // velocity's wssUrl (velocity is still used for auth/health/dashboard below).
+    let WS_SERVER_URL = 'wss://wss.rebatecodeclaimer.com/ws';
+    // Low-privilege key: only unlocks the /ws listener feed on that relay, not
+    // its admin routes. Safe to ship in a client-distributed script.
+    const MAIN_SERVER_CLIENT_KEY = '62b0cc3b839d2ae04e523596abf120b782a1a216f72ea914a9540776ec3ec5fc';
     let AUTH_CHECK_URL = 'https://code-auth11-4cc0b14f630c.herokuapp.com/check'; 
     // --- DYNAMIC CONFIG END ---
 
@@ -2874,7 +2879,7 @@ const GM_xmlhttpRequest = (details) => {
 
         try {
             // Append username to WS URL for backend auth
-            const wsUrlWithUser = `${WS_SERVER_URL}?user=${currentUsername}&real=true`;
+            const wsUrlWithUser = `${WS_SERVER_URL}?user=${currentUsername}&real=true&key=${MAIN_SERVER_CLIENT_KEY}`;
             webSocket = new WebSocket(wsUrlWithUser);
             webSocket.onopen = () => {
                 addLog("Connected to Main Server", "success");
@@ -3815,8 +3820,10 @@ const GM_xmlhttpRequest = (details) => {
                     try {
                         const config = JSON.parse(res.responseText);
                         // The worker returns 'wssUrl' (best one) and 'authUrl' (default)
+                        // NOTE: wssUrl is intentionally NOT applied to WS_SERVER_URL anymore -
+                        // the main server is hardcoded to our own relay above. Velocity is
+                        // still used for authUrl/healthUrl/dashboard below, unchanged.
                         if (config.wssUrl && config.authUrl) {
-                            WS_SERVER_URL = config.wssUrl;
                             AUTH_CHECK_URL = config.authUrl;
                             if (config.healthUrl) {
                                 HEALTH_WS_URL = config.healthUrl;
@@ -3867,10 +3874,8 @@ const GM_xmlhttpRequest = (details) => {
 
                         let urlsChanged = false;
 
-                        if (config.wssUrl !== WS_SERVER_URL) {
-                            WS_SERVER_URL = config.wssUrl;
-                            urlsChanged = true;
-                        }
+                        // WS_SERVER_URL is intentionally NOT updated from config.wssUrl
+                        // anymore - the main server is hardcoded to our own relay.
                         if (config.authUrl !== AUTH_CHECK_URL) {
                             AUTH_CHECK_URL = config.authUrl;
                             // AUTH_CHECK_URL change doesn't need a reconnect — next auth
