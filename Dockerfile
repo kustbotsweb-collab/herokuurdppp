@@ -1,10 +1,7 @@
-FROM ubuntu:22.04
+FROM debian:13
 ENV DEBIAN_FRONTEND=noninteractive
 # 1. Install dependencies (Added curl, bzip2, and xz-utils for the manual Firefox Dev install)
-RUN sed -i 's/archive.ubuntu.com/eu-west-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/eu-west-1.ec2.archive.ubuntu.com/g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y \
-    software-properties-common \
+RUN apt-get update && apt-get install -y \
     gnupg \
     wget \
     curl \
@@ -28,7 +25,7 @@ RUN sed -i 's/archive.ubuntu.com/eu-west-1.ec2.archive.ubuntu.com/g' /etc/apt/so
     libexpat1 \
     libfontconfig1 \
     libgcc-s1 \
-    libgdk-pixbuf2.0-0 \
+    libgdk-pixbuf-2.0-0 \
     libglib2.0-0 \
     libgtk-3-0 \
     libnspr4 \
@@ -64,7 +61,7 @@ RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/v0.34.0/ge
     && rm /tmp/geckodriver.tar.gz
 # ------------------------------------------------
 # --- Install Python Libraries ---
-RUN pip3 install selenium
+RUN pip3 install --break-system-packages selenium
 # --------------------------------
 # --- FIREFOX CONFIGURATION (FIX: Allow Unsigned Extensions) ---
 # For Developer Edition, these files live in /opt/firefox
