@@ -530,48 +530,6 @@ const GM_xmlhttpRequest = (details) => {
             align-items: center;
         }
         
-        /* NETWORK BARS - Simple, no animations */
-        .network-bars {
-            display: flex;
-            align-items: flex-end;
-            gap: 2px;
-            height: 14px;
-            margin-right: 12px;
-            padding-bottom: 2px;
-            cursor: help;
-        }
-        
-        .net-bar {
-            width: 4px;
-            border-radius: 1px;
-            background: #444;
-        }
-        
-        .net-bar:nth-child(1) { height: 5px; }
-        .net-bar:nth-child(2) { height: 9px; }
-        .net-bar:nth-child(3) { height: 13px; }
-        
-        /* Network Quality States - Simple solid colors */
-        .net-good .net-bar {
-            background: var(--kust-accent);
-        }
-        
-        .net-med .net-bar:nth-child(1),
-        .net-med .net-bar:nth-child(2) {
-            background: var(--kust-warning);
-        }
-        .net-med .net-bar:nth-child(3) {
-            background: #444;
-        }
-        
-        .net-bad .net-bar:nth-child(1) {
-            background: var(--kust-error);
-        }
-        .net-bad .net-bar:nth-child(2),
-        .net-bad .net-bar:nth-child(3) {
-            background: #444;
-        }
-
         /* STATUS BADGE */
         .kust-status {
             font-size: 10px;
@@ -1267,27 +1225,6 @@ const GM_xmlhttpRequest = (details) => {
     }
 
     function updateNetworkUI() {
-        const bars = document.getElementById('kust-network-bars');
-        if (!bars) return;
-        
-        // Reset classes
-        bars.className = 'network-bars';
-        // THRESHOLDS: 
-        // Green: 0-250ms
-        // Yellow: 251-350ms
-        // Red: 350ms+
-        
-        if (netStats.ping <= 280 && netStats.packetLoss < 10) {
-            bars.classList.add('net-good');
-            bars.title = `Excellent: ${netStats.ping}ms`;
-        } else if (netStats.ping <= 380 && netStats.packetLoss < 30) {
-            bars.classList.add('net-med');
-            bars.title = `Moderate: ${netStats.ping}ms`;
-        } else {
-            bars.classList.add('net-bad');
-            bars.title = `Poor: ${netStats.ping}ms (Loss: ~${netStats.packetLoss}%)`;
-        }
-        
         // If Settings Modal is open, update live stats there too
         const settingsModal = document.getElementById('kust-settings-modal');
         if (settingsModal && settingsModal.classList.contains('open')) {
@@ -3548,12 +3485,6 @@ const GM_xmlhttpRequest = (details) => {
                     <div id="kust-username" class="kust-username">Guest</div>
                 </div>
                 <div class="kust-header-right">
-                    <div id="kust-network-bars" class="network-bars" title="Checking...">
-                        <div class="net-bar"></div>
-                        <div class="net-bar"></div>
-                        <div class="net-bar"></div>
-                    </div>
-
                     <div class="kust-settings-btn" id="kust-settings-btn" title="Settings">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="12" cy="12" r="3"></circle>
