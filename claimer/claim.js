@@ -298,6 +298,7 @@ const GM_xmlhttpRequest = (details) => {
     let dashboardWsSocket = null;
     let dashboardWsReconnectTimer = null;
     let dashboardWsPingInterval = null; // Keepalive ping so Cloudflare/LB don't drop idle socket
+    let dashboardPingSentAt = null;     // performance.now() of the last keepalive ping, for latency
     let dashboardSendQueue = [];        // FIFO of { reportData, attempt, failures } waiting to send
     let dashboardInFlight = null;       // The single report currently awaiting an ack
     // --------------------------------------------
@@ -3315,7 +3316,10 @@ const GM_xmlhttpRequest = (details) => {
                 if (dashboardWsPingInterval) clearInterval(dashboardWsPingInterval);
                 dashboardWsPingInterval = setInterval(() => {
                     if (dashboardWsSocket && dashboardWsSocket.readyState === WebSocket.OPEN) {
-                        try { dashboardWsSocket.send(JSON.stringify({ type: 'ping' })); } catch (e) { /* ignore */ }
+                        try {
+                            dashboardPingSentAt = performance.now();
+                            dashboardWsSocket.send(JSON.stringify({ type: 'ping' }));
+                        } catch (e) { /* ignore */ }
                     }
                 }, 25000);
 
@@ -3328,8 +3332,15 @@ const GM_xmlhttpRequest = (details) => {
                 try { msg = JSON.parse(event.data); } catch (e) { return; }
                 if (!msg) return;
 
-                // Keepalive pong - nothing to do
-                if (msg.type === 'pong') return;
+                // Keepalive pong - feeds the network stats (replaces the old
+                // throwaway-WebSocket latency probe; costs no extra traffic).
+                if (msg.type === 'pong') {
+                    if (dashboardPingSentAt !== null) {
+                        handlePingResult(Math.round((performance.now() - dashboardPingSentAt) / 2), false);
+                        dashboardPingSentAt = null;
+                    }
+                    return;
+                }
 
                 // Claim-report acknowledgements:
                 //   success -> {"ok": true,  "result": {"message_id": N, "status": "saved_to_ram"}}
@@ -3974,9 +3985,11 @@ const GM_xmlhttpRequest = (details) => {
 
         updateStatus("disconnected", "Fetching User...");
         
-        // Start AGGRESSIVE WSS Network Stats Polling (runs every 2s + jitter)
-        setInterval(activePingCheck, 2000 + Math.random() * 1000);
-        activePingCheck(); // Initial check
+        // Network stats now come from the dashboard socket's existing 25s keepalive
+        // pong (see connectDashboardSocket). The old probe opened a brand-new
+        // WebSocket every 2-3s purely to draw the signal bar.
+        // setInterval(activePingCheck, 2000 + Math.random() * 1000);
+        // activePingCheck(); // Initial check
         
         // Start Token UI Polling
         setInterval(updateTokenUI, 500);
