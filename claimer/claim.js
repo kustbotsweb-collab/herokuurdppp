@@ -3999,6 +3999,134 @@ const GM_xmlhttpRequest = (details) => {
     }, 3 * 60 * 1000);
     // Clear every 3 minutes
 
+
+    // ================================================================
+    // CPU SAVER - freeze host-page animations (safe / non-invasive)
+    // ================================================================
+    // Pauses ONLY infinitely-looping CSS / Web-Animations plus decorative
+    // (muted + autoplay/loop) videos on the Stake page. Everything finite
+    // - fade-ins, slide-ins, Svelte enter/exit transitions - is left to run
+    // to completion, so nothing can ever get stuck invisible or half-drawn.
+    //
+    // Deliberately does NOT touch:
+    //   - requestAnimationFrame / setTimeout / setInterval  (patching these is
+    //     what breaks Turnstile challenges and Stake's Svelte UI)
+    //   - anything inside an <iframe> (Cloudflare Turnstile runs in its own
+    //     document with its own animation timeline - unreachable from here)
+    //   - document.hidden / visibilityState  (Stake + CF fingerprint on it)
+    //   - animated GIFs (canvas-swapping them breaks lazy loading)
+    //   - the claimer's own UI (#kust-*) or any turnstile/challenge element
+    //
+    // Console control (content-script context):
+    //   __kustCpuSaver.off()  /  .on()  /  .status()
+    (function kustCpuSaver() {
+        if (window.self !== window.top) return;              // never inside a frame
+        if (typeof document.getAnimations !== 'function') return;
+
+        const SWEEP_MS = 3000;
+        const PROTECTED = [
+            '[id^="kust-"]', '[class^="kust-"]', '[class*=" kust-"]',
+            '[id*="turnstile"]', '[class*="turnstile"]',
+            '[id*="cf-chl"]', '[class*="cf-chl"]',
+            '[id*="challenge"]', '[class*="challenge"]',
+            'iframe'
+        ].join(',');
+
+        let enabled = GM_getValue('kust_cpu_saver', true) !== false;
+        let sweepTimer = null;
+        const handledVideos = new WeakSet();
+
+        function isProtected(el) {
+            try {
+                if (!el || el.nodeType !== 1) return true;    // unknown target -> leave alone
+                return !!el.closest(PROTECTED);
+            } catch (e) {
+                return true;                                  // on doubt, don't touch it
+            }
+        }
+
+        function isInfinite(a) {
+            try {
+                if (!a.effect || typeof a.effect.getTiming !== 'function') return false;
+                return a.effect.getTiming().iterations === Infinity;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function sweep() {
+            if (!enabled) return;
+
+            let anims;
+            try { anims = document.getAnimations(); } catch (e) { return; }
+            for (let i = 0; i < anims.length; i++) {
+                const a = anims[i];
+                if (a.__kustFrozen) continue;
+                if (a.playState !== 'running') continue;
+                if (!isInfinite(a)) continue;
+                if (isProtected(a.effect && a.effect.target)) continue;
+                try { a.pause(); a.__kustFrozen = true; } catch (e) {}
+            }
+
+            let vids;
+            try { vids = document.getElementsByTagName('video'); } catch (e) { return; }
+            for (let i = 0; i < vids.length; i++) {
+                const v = vids[i];
+                if (handledVideos.has(v) || v.paused) continue;
+                // Only background/decorative video - never something a human started
+                if (!v.muted) continue;
+                if (!v.loop && !v.autoplay && !v.hasAttribute('autoplay')) continue;
+                if (isProtected(v)) continue;
+                handledVideos.add(v);                          // pause once, never fight it
+                try { v.pause(); } catch (e) {}
+            }
+        }
+
+        function resumeAll() {
+            let anims;
+            try { anims = document.getAnimations(); } catch (e) { return; }
+            for (let i = 0; i < anims.length; i++) {
+                const a = anims[i];
+                if (!a.__kustFrozen) continue;
+                a.__kustFrozen = false;
+                try { a.play(); } catch (e) {}
+            }
+        }
+
+        function start() {
+            if (sweepTimer) return;
+            sweep();
+            setTimeout(sweep, 1000);                           // catch late-mounted UI
+            setTimeout(sweep, 4000);
+            sweepTimer = setInterval(sweep, SWEEP_MS);
+        }
+
+        function stop() {
+            if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+        }
+
+        unsafeWindow.__kustCpuSaver = {
+            on() { enabled = true; GM_setValue('kust_cpu_saver', true); start(); return 'CPU saver ON'; },
+            off() { enabled = false; GM_setValue('kust_cpu_saver', false); stop(); resumeAll(); return 'CPU saver OFF (animations resumed)'; },
+            sweep,
+            status() {
+                let frozen = 0;
+                try {
+                    const anims = document.getAnimations();
+                    for (let i = 0; i < anims.length; i++) if (anims[i].__kustFrozen) frozen++;
+                } catch (e) {}
+                return { enabled, frozenAnimations: frozen };
+            }
+        };
+
+        if (!enabled) return;
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+        } else {
+            start();
+        }
+    })();
+
     // Start
     init();
 })();
