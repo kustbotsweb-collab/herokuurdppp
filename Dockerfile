@@ -1,5 +1,10 @@
 FROM debian:13
 ENV DEBIAN_FRONTEND=noninteractive
+# Use Debian's official CloudFront-backed mirror (Amazon-sponsored, cdn-aws.deb.debian.org)
+# instead of the generic public deb.debian.org, so apt traffic gets routed through
+# AWS's own CDN edge (nearest to ap-south-1/Mumbai) instead of the public internet.
+RUN sed -i 's/deb\.debian\.org/cdn-aws.deb.debian.org/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+RUN sed -i 's/deb\.debian\.org/cdn-aws.deb.debian.org/g' /etc/apt/sources.list 2>/dev/null || true
 # 1. Install dependencies (Added curl, bzip2, and xz-utils for the manual Firefox Dev install)
 RUN apt-get update && apt-get install -y \
     gnupg \
